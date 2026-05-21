@@ -1,9 +1,14 @@
 # IDM Desktop Automation + Agentic AI System
 
-**Internet Download Manager (IDM) v6.x** 를 대상으로 한 Windows 데스크톱 UI 자동화 및 자연어 기반 에이전틱 AI 시스템.
+A Windows desktop UI automation framework targeting **Internet Download Manager (IDM) v6.x**, paired with a natural-language agentic layer that converts English and Korean commands into executable IDM actions.
 
-WebdriverIO v9 → Appium 2.x → WinAppDriver v1.2.1 스택을 통해 Win32 UIA 트리를 제어하며,  
-Google Gemini 2.5 Flash LLM + Regex 이중 파서 구조로 한국어/영어 자연어 명령을 IDM 액션으로 변환한다.
+The automation stack operates as a three-tier bridge:
+
+```
+WebdriverIO v9 (W3C)  →  Appium 2.x :4724 (JSONWP proxy)  →  WinAppDriver v1.2.1 (Win32 UIA)
+```
+
+WinAppDriver v1.2.1 rejects the W3C WebDriver protocol natively; Appium 2.x acts as the translation layer, converting W3C requests into JSONWP before forwarding to WinAppDriver.
 
 ---
 
@@ -12,21 +17,23 @@ Google Gemini 2.5 Flash LLM + Regex 이중 파서 구조로 한국어/영어 자
 | Layer | Technology | Version |
 |---|---|---|
 | Test Runner | WebdriverIO | ^9.27.1 |
-| Language | TypeScript | ^5.8.3 |
+| Language | TypeScript (strict mode) | ^5.8.3 |
 | TS Executor | tsx | ^4.19.4 |
-| Desktop Bridge | Appium (appium-windows-driver) | 2.x |
+| Desktop Bridge | Appium + appium-windows-driver | 2.x |
 | WinAPI Driver | WinAppDriver | 1.2.1 |
 | Test Framework | Mocha (`@wdio/mocha-framework`) | ^9.27.1 |
+| Assertions | expect-webdriverio | ^5.6.5 |
 | LLM Provider | Google Gemini 2.5 Flash | API v1beta |
 | Runtime | Node.js | ≥ 18 |
 
-### Protocol Bridge
+**TypeScript compiler flags enforced:**
 
+```json
+"strict": true,
+"noUnusedLocals": true,
+"noUnusedParameters": true,
+"noFallthroughCasesInSwitch": true
 ```
-WebdriverIO (W3C)  →  Appium :4724  →  WinAppDriver (JSONWP)  →  Win32 UIA
-```
-
-WinAppDriver v1.2.1은 W3C WebDriver 프로토콜을 거부한다. Appium 2.x가 W3C→JSONWP 변환 프록시 역할을 수행하여 두 계층을 연결한다.
 
 ---
 
@@ -34,82 +41,103 @@ WinAppDriver v1.2.1은 W3C WebDriver 프로토콜을 거부한다. Appium 2.x가
 
 ### Prerequisites
 
-| 요구사항 | 버전 | 비고 |
+| Requirement | Version | Notes |
 |---|---|---|
 | Windows | 10 / 11 64-bit | |
-| Node.js | ≥ 18 | `node -v` 확인 |
-| Internet Download Manager | 6.x | 기본 경로 설치 |
-| WinAppDriver | 1.2.1 | 관리자 권한으로 실행 |
-| Appium | 2.x | 전역 설치 |
+| Node.js | ≥ 18 | Verify with `node -v` |
+| Internet Download Manager | 6.x | Installed at default path |
+| WinAppDriver | 1.2.1 | Must be running as Administrator on port 4723 |
+| Appium | 2.x | Globally installed; listens on port 4724 |
 
-### Install Steps
+### Install
 
 ```powershell
-# 1. Appium 전역 설치 (최초 1회)
+# Step 1 — Install Appium globally (one-time)
 npm install -g appium
 
-# 2. Appium Windows 드라이버 설치 (최초 1회)
+# Step 2 — Install the Appium Windows driver (one-time)
 appium driver install windows
 
-# 3. 프로젝트 의존성 설치
+# Step 3 — Install project dependencies
 npm install
-
-# 4. LLM API 키 설정 (선택 — 없어도 Regex 파서로 동작)
-# 프로젝트 루트에 .env 파일 생성:
-# LLM_API_KEY=your_google_ai_studio_key
 ```
 
-> `LLM_API_KEY` 미설정 시 Gemini LLM 호출을 건너뛰고 내장 Regex 파서만 사용한다.  
-> 테스트와 에이전트의 핵심 기능은 API 키 없이도 완전히 동작한다.
+### Environment Variables
+
+Create a `.env` file in the project root (optional — only required for LLM-enhanced parsing):
+
+```env
+LLM_API_KEY=your_google_ai_studio_key_here
+```
+
+Obtain a free key at [Google AI Studio](https://aistudio.google.com/app/apikey).
+
+> If `LLM_API_KEY` is absent or the Gemini API is unreachable, the agent automatically
+> falls back to the built-in Regex parser. All core functionality operates without a key.
 
 ---
 
 ## 🏃 How to Run
 
-### UI 자동화 테스트 (Mocha E2E)
+### Automated Test Suite
 
 ```powershell
 npm run wdio
 ```
 
-- `@wdio/appium-service` 가 Appium을 포트 4724에서 자동 기동/종료한다.
-- WinAppDriver는 별도로 관리자 권한 실행 상태여야 한다.
-- IDM에 다운로드 항목이 없으면 인터랙션 테스트는 `SKIPPED(-)` 로 정상 마킹된다 (false-positive 없음).
+- `@wdio/appium-service` automatically starts and stops Appium on port 4724 around the test run.
+- WinAppDriver must already be running as Administrator.
+- IDM must be open. If the download queue is empty, interaction tests are marked **SKIPPED (−)** — not PASSED — ensuring zero false-positives.
 
-**IDM 큐가 빈 상태의 기대 출력:**
+**Expected output with an empty queue:**
 
 ```
 NL Parser — unit tests
   ✓ parses "list all downloads"
   ✓ parses "pause the first download"
-  ... (10 passing)
+  ✓ parses "resume ubuntu.iso"
+  ✓ parses "delete the last item"
+  ✓ parses "start 3rd download"
+  ✓ parses "delete completed files" as clear
+  ✓ parses "show me all downloads" as list
+  ✓ parses "pause number 2"
+  ✓ throws on unrecognised action
+  ✓ throws on empty input
 
 IDM Agent — NL command execution
   ✓ should list all downloads via natural language
-  - should pause the first download via natural language   (skipped)
-  - should resume the first paused download via natural language   (skipped)
+  - should pause the first download via natural language      (skipped)
+  - should resume the first paused download via natural language  (skipped)
   ✓ should handle an unknown filename gracefully
 
 LLM Parser — parseCommand unit tests
-  ✓ parses Korean conversational pause: "야 나 어제 받던 우분투 파일 잠깐 멈춰줄래?"
-  ... (7 passing)
+  ✓ parses Korean conversational pause
+  ✓ parses Korean list command
+  ✓ parses Korean delete-last
+  ✓ parses Korean resume-second
+  ✓ parses conversational English
+  ✓ parses implicit list
+  ✓ throws on empty input even with LLM path
 
 IDM — UI Automation
   ✓ should launch IDM and verify the main window is accessible
   ✓ should extract downloads and print structured data
-  - should pause the first active download   (skipped)
-  ...
+  - should pause the first active download    (skipped)
+  - should resume the first paused download   (skipped)
+  - should start the first queued download    (skipped)
 
 Spec Files: 2 passed, 2 total
 ```
 
-### 에이전트 REPL 실행
+### Agent REPL (Interactive CLI)
 
 ```powershell
 npm run start:agent
 ```
 
-IDM에 Appium 세션을 연결하고 대화형 자연어 명령 루프(REPL)를 시작한다.
+Establishes an Appium session against IDM and enters an interactive natural-language command loop.
+
+**Sample session:**
 
 ```
 Agent > list all downloads
@@ -129,51 +157,51 @@ Agent > undo
 [Agent] Cannot undo "delete" — this action is irreversible.
 
 Agent > repeat
-[Agent] Repeating: delete "debian.iso"
-...
+[Agent] Repeating: pause "ubuntu.iso"
+[Result] ✓ "ubuntu.iso" paused successfully.
 
 Agent > exit
 ```
 
-**지원 명령어:**
+**Supported commands:**
 
-| 유형 | 영어 예시 | 한국어 예시 |
+| Type | English Example | Korean Example |
 |---|---|---|
-| 목록 조회 | `list all downloads` | `다운로드 목록 보여줘` |
-| 일시정지 | `pause ubuntu.iso` | `우분투 파일 멈춰줘` |
-| 재개 | `resume the second download` | `두 번째 파일 다시 시작해줘` |
-| 시작 | `start first download` | `첫 번째 다운로드 시작해` |
-| 삭제 | `delete the last item` | `맨 마지막 꺼 취소해` |
-| 완료 정리 | `clear all completed` | `완료된 파일들 다 정리해줘` |
-| 반복 | `repeat` / `do it again` | — |
-| 되돌리기 | `undo` (pause↔resume, start→pause) | — |
-| 배치 실행 | `pause first and delete the second` | `첫 번째 멈추고 두 번째 삭제해` |
+| List | `list all downloads` | `다운로드 목록 보여줘` |
+| Pause | `pause ubuntu.iso` | `우분투 파일 멈춰줘` |
+| Resume | `resume the second download` | `두 번째 파일 다시 시작해줘` |
+| Start | `start first download` | `첫 번째 다운로드 시작해` |
+| Delete | `delete the last item` | `맨 마지막 꺼 취소해` |
+| Clear completed | `clear all completed` | `완료된 파일들 다 정리해줘` |
+| Repeat | `repeat` / `do it again` | — |
+| Undo | `undo` (pause↔resume, start→pause) | — |
+| Batch | `pause first and delete the second` | — |
 
 ---
 
-## 🤖 Agentic AI Architecture
+## 🤖 Agentic AI Architecture & Hybrid Fail-Safe
 
-### 전체 파이프라인
+### Multi-Tier Parsing Pipeline
 
 ```
 User Input (EN / KO)
         │
         ▼
-┌──────────────────────────────────────────────────┐
-│              parseCommand(text)                  │
-│                                                  │
-│  ┌───────────────────────────┐                   │
-│  │  Gemini 2.5 Flash (LLM)  │  ← LLM_API_KEY    │
-│  │  structured JSON output  │    필요             │
-│  │  timeout: 8 s            │                   │
-│  └────────────┬─────────────┘                   │
-│               │ 실패 · 타임아웃 · 키 없음           │
-│               ▼                                  │
-│  ┌───────────────────────────┐                   │
-│  │  Regex Fallback Parser   │  ← 항상 동작        │
-│  │  parseNaturalLanguage()  │                   │
-│  └───────────────────────────┘                   │
-└──────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                   parseCommand(text)                    │
+│                                                         │
+│   ┌──────────────────────────────────┐                  │
+│   │        Gemini 2.5 Flash          │ ← LLM_API_KEY   │
+│   │  Structured JSON via responseSchema               │
+│   │  HTTP POST, 8-second race timeout │                 │
+│   └─────────────────┬────────────────┘                  │
+│                     │  failure / timeout / no key       │
+│                     ▼                                   │
+│   ┌──────────────────────────────────┐                  │
+│   │      Regex Fallback Parser       │ ← always active  │
+│   │   parseNaturalLanguage(text)     │                  │
+│   └──────────────────────────────────┘                  │
+└─────────────────────────────────────────────────────────┘
         │
         ▼
   IdmCommand { action, target, index? }
@@ -182,55 +210,67 @@ User Input (EN / KO)
   resolveTarget()  →  DownloadItem[]
         │
         ▼
-  IdmPage.pauseDownload() / startDownload() / ...
+  IdmPage interaction method
         │
         ▼
-  waitForStatusChange()  →  CommandResult
+  waitForStatusChange()  →  CommandResult { success, message }
 ```
 
-### Hybrid Fail-safe Fallback
+### Hybrid Fail-Safe Fallback Mechanism
 
-Gemini API Free Tier는 분당 5회 요청 제한이 있으며 429(Quota Exceeded), 503(Unavailable) 오류가 발생할 수 있다. 다음 4가지 경로에서 모두 Regex 파서로 자동 전환된다:
+The Gemini API Free Tier enforces a limit of **5 requests per minute**. Under sustained load, the API returns HTTP `429 (Quota Exceeded)` or `503 (Unavailable)`. Without a fallback, these errors would cause a complete agent blackout.
+
+The system prevents this via a `Promise.race` guard with a deterministic Regex fallback:
 
 ```typescript
-// src/agent/nlParser.ts — parseCommand()
+// src/agent/nlParser.ts
 const llmResult = await Promise.race([
     parseWithLLM(text),
     new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000)),
 ]);
-if (llmResult) return llmResult;        // LLM 성공
-return parseNaturalLanguage(text);      // 모든 실패 경우 → Regex 폴백
+
+if (llmResult) return llmResult;       // LLM succeeded
+return parseNaturalLanguage(text);     // All failure paths → Regex parser
 ```
 
-| 조건 | 동작 |
+| Failure Condition | Behaviour |
 |---|---|
-| `LLM_API_KEY` 미설정 | LLM 호출 즉시 건너뜀, Regex 파서 실행 |
-| API 429 / 503 에러 | 경고 로그 출력 후 Regex 폴백 |
-| 8초 타임아웃 | `Promise.race` null 반환 → Regex 폴백 |
-| LLM JSON 스키마 불일치 | `isValidIdmCommand()` 실패 → Regex 폴백 |
+| `LLM_API_KEY` not set | LLM call skipped entirely; Regex parser invoked immediately |
+| HTTP 429 — Quota Exceeded | Warning logged; stream diverted to Regex parser |
+| HTTP 503 — Service Unavailable | Warning logged; stream diverted to Regex parser |
+| 8-second timeout | `Promise.race` resolves `null`; Regex parser invoked |
+| LLM JSON schema mismatch | `isValidIdmCommand()` returns false; Regex parser invoked |
 
-### Command Schema (`src/agent/types.ts`)
+The Regex parser covers all primary command patterns in both English and Korean, including colloquial forms (`멈춰`, `취소해`, `정리해줘`), ordinal positions (`first`, `두 번째`, `last`), and compound constructs. **The agent never halts due to LLM unavailability.**
+
+### Command Schema
 
 ```typescript
+// src/agent/types.ts
 interface IdmCommand {
     action: 'start' | 'pause' | 'resume' | 'delete' | 'list' | 'clear';
-    target: string;   // 파일명 substring 또는 '*' (전체 와일드카드)
-    index?: number;   // 0-based 위치; -1 = 마지막
+    target: string;    // filename substring or '*' (wildcard)
+    index?: number;    // 0-based position; -1 = last
 }
 ```
 
-### Smart Target Resolution (`src/agent/targetResolver.ts`)
+### Smart Target Resolution
 
-| 우선순위 | 전략 | 예시 입력 | 처리 방식 |
+```
+resolveTarget(target, downloads, index?)  →  DownloadItem[]
+```
+
+| Priority | Strategy | Input Example | Resolution |
 |---|---|---|---|
-| 1 | 명시적 인덱스 | `"first"`, `"3rd"`, `"last"` | `index=0`, `index=2`, `index=-1` |
-| 2 | 와일드카드 | `target="*"` | 전체 `downloads[]` 반환 |
-| 3 | 상태 기반 필터 | `target="completed"` | `status` 필드 포함 항목 필터 |
-| 4 | 파일명 substring | `target="ubuntu"` | `"ubuntu.iso"` 매칭 |
+| 1 | Explicit index | `"first"`, `"3rd"`, `"last"` | `index=0`, `index=2`, `index=-1` |
+| 2 | Wildcard | `target="*"` | Returns full `downloads[]` |
+| 3 | Status filter | `target="completed"` | Filters by `status` field |
+| 4 | Filename substring | `target="ubuntu"` | Matches `"ubuntu.iso"` |
 
-### Command Memory (`src/main.ts`)
+### Command Memory
 
 ```typescript
+// src/main.ts
 const commandHistory: IdmCommand[] = [];
 
 const UNDO_MAP: Partial<Record<ActionType, ActionType>> = {
@@ -240,9 +280,9 @@ const UNDO_MAP: Partial<Record<ActionType, ActionType>> = {
 };
 ```
 
-- **repeat**: 마지막 성공 커맨드 재실행
-- **undo**: UNDO_MAP 기반 역액션 (`delete` / `clear` / `list` 는 비가역)
-- **배치 실행**: `and` / `then` 구분자로 순차 실행, 하나 실패해도 나머지 계속 진행
+- **`repeat`**: Re-executes the last successfully dispatched command.
+- **`undo`**: Executes the logical inverse via `UNDO_MAP`. `delete`, `clear`, and `list` are irreversible.
+- **Batch execution**: Input is split on `\s+(?:and|then)\s+`; sub-commands run sequentially. A failure in one sub-command does not abort the remainder.
 
 ---
 
@@ -251,29 +291,29 @@ const UNDO_MAP: Partial<Record<ActionType, ActionType>> = {
 ```
 idm-automation/
 ├── src/
-│   ├── main.ts                  ← 에이전트 REPL (배치 / memory / undo)
+│   ├── main.ts                  ← Agent REPL entry point (batch / memory / undo)
 │   └── agent/
-│       ├── types.ts             ← IdmCommand, DownloadItem, CommandResult
-│       ├── nlParser.ts          ← Gemini LLM + Regex 이중 파서
-│       ├── dispatcher.ts        ← IdmCommand → IdmPage 함수 매핑
-│       └── targetResolver.ts    ← 스마트 타깃 해석
+│       ├── types.ts             ← IdmCommand, DownloadItem, CommandResult interfaces
+│       ├── nlParser.ts          ← Gemini LLM + Regex dual-parser
+│       ├── dispatcher.ts        ← IdmCommand → IdmPage function dispatcher
+│       └── targetResolver.ts    ← Smart target resolution (index / status / filename)
 ├── test/
 │   ├── pageobjects/
-│   │   └── IdmPage.ts           ← IDM Win32 UIA 페이지 오브젝트
+│   │   └── IdmPage.ts           ← IDM Win32 UIA Page Object (all interactions)
 │   └── specs/
-│       ├── test.e2e.ts          ← UI 자동화 계층 테스트 (Tasks 3–5)
-│       └── agent.e2e.ts         ← 에이전트 계층 테스트 (Tasks 9–14)
-├── wdio.conf.ts                 ← WebdriverIO + Appium 세션 설정
-├── tsconfig.json                ← strict / noUnusedLocals / noUnusedParameters
+│       ├── test.e2e.ts          ← UI automation layer tests (Tasks 3–5)
+│       └── agent.e2e.ts         ← Agent layer tests (Tasks 9–14)
+├── wdio.conf.ts                 ← WebdriverIO + Appium session configuration
+├── tsconfig.json                ← TypeScript strict configuration
 ├── package.json
-└── REPORT.md                    ← IDM UI 분석 보고서 (Tasks 1–2)
+└── REPORT.md                    ← IDM UI analysis report (Tasks 1–2)
 ```
 
 ---
 
-## ⚙️ Configuration
+## ⚙️ Configuration Reference
 
-### Appium Session (`wdio.conf.ts`)
+### Appium Capabilities (`wdio.conf.ts`)
 
 ```typescript
 capabilities: [{
@@ -285,25 +325,12 @@ capabilities: [{
 } as WebdriverIO.Capabilities]
 ```
 
-### TypeScript (`tsconfig.json`)
+### Design Constraints
 
-```json
-{
-  "strict": true,
-  "noUnusedLocals": true,
-  "noUnusedParameters": true,
-  "noFallthroughCasesInSwitch": true,
-  "ignoreDeprecations": "6.0"
-}
-```
-
----
-
-## 🛡️ Design Constraints
-
-| 제약 | 구현 방식 |
+| Constraint | Implementation |
 |---|---|
-| `browser.pause()` 금지 | 모든 UI 동기화에 `browser.waitUntil()` 사용 |
-| 좌표 기반 클릭 금지 | XPath / UIA Name 속성 기반 element 선택만 허용 |
-| 파일 확장자 보존 | `extractTarget()` 에서 `.` 을 제거하지 않음 (`ubuntu.iso` 보존) |
-| Stale Element 방어 | `withRetry(maxAttempts=3)` 및 매 폴링마다 element 재조회 |
+| No `browser.pause()` | All UI synchronization uses `browser.waitUntil()` exclusively |
+| No coordinate-based clicks | All element targeting via XPath or UIA Name attribute |
+| Preserve file extensions | `extractTarget()` does not strip `.` — `ubuntu.iso` is preserved as-is |
+| Stale element resilience | `withRetry(maxAttempts=3)` with exponential backoff on all click paths |
+| Live status polling | `getLiveStatus(index)` re-fetches the full element list on every `waitUntil` cycle |
