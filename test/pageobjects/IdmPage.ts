@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import type { DownloadItem } from '../../src/agent/types';
 
 // ---------------------------------------------------------------------------
@@ -71,8 +73,36 @@ export class IdmPage {
 
     /** Wait until the IDM main window is visible and interactive. */
     async waitForReady(timeoutMs = 15_000): Promise<void> {
-        // browser.getTitle() returns the UIA Name of the session root window.
-        // This is more reliable than findElement, which maps '~x' to AutomationId (not Name).
+        // Step 2: print title + all window handles to help diagnose session scope issues
+        try {
+            const title = await browser.getTitle();
+            console.log(`[Debug] Current window title: "${title}"`);
+
+            // getWindowHandles returns all open window handles for this session
+            const handles = await browser.getWindowHandles();
+            console.log(`[Debug] Window handles (${handles.length}):`, handles);
+
+            // If we are not on the IDM main window, scan handles to find it
+            if (!title.toLowerCase().includes('internet download manager')) {
+                console.log('[Debug] Current window is NOT the IDM main window — scanning handles...');
+                for (const handle of handles) {
+                    try {
+                        await browser.switchToWindow(handle);
+                        const t = await browser.getTitle();
+                        console.log(`[Debug]   Handle ${handle}: "${t}"`);
+                        if (t.toLowerCase().includes('internet download manager')) {
+                            console.log(`[Debug]   Switched to IDM main window via handle ${handle}`);
+                            break;
+                        }
+                    } catch {
+                        // handle not accessible — continue
+                    }
+                }
+            }
+        } catch (diagErr) {
+            console.log('[Debug] waitForReady diagnostic failed:', diagErr instanceof Error ? diagErr.message : diagErr);
+        }
+
         await browser.waitUntil(
             async () => {
                 try {
@@ -97,10 +127,31 @@ export class IdmPage {
     /** Return all current downloads as structured objects. */
     async extractDownloads(): Promise<DownloadItem[]> {
         await this.waitForReady();
+
+        // Step 1: save raw page source for offline inspection
+        try {
+            const xml = await browser.getPageSource();
+            const logsDir = path.join(process.cwd(), 'logs');
+            fs.mkdirSync(logsDir, { recursive: true });
+            fs.writeFileSync(path.join(logsDir, 'pagesource-debug.xml'), xml, 'utf8');
+            console.log(`[Debug] Page source saved to logs/pagesource-debug.xml (${xml.length} chars)`);
+        } catch (e) {
+            console.log('[Debug] Could not save page source:', e instanceof Error ? e.message : e);
+        }
+
         const rows = await this.getListItems();
+        console.log(`[Debug] Found ${rows.length} list items in SysListView32`);
+
         const result: DownloadItem[] = [];
 
         for (let i = 0; i < rows.length; i++) {
+            // Step 1: print raw Name attribute before parsing
+            try {
+                const nameAttr = (await rows[i].getAttribute('Name')) ?? '(null)';
+                console.log(`[Debug] Item ${i} raw Name: "${nameAttr}"`);
+            } catch (e) {
+                console.log(`[Debug] Item ${i} could not read Name:`, e instanceof Error ? e.message : e);
+            }
             result.push(await this.parseRow(rows[i], i));
         }
 
@@ -298,15 +349,55 @@ export class IdmPage {
     // -----------------------------------------------------------------------
 
     private async getListItems(): Promise<WebdriverIO.Element[]> {
-        // Use the global $$ with a combined absolute XPath instead of chaining
-        // element.$$ — chained $$ in WDIO v9 returns a ChainablePromiseArray that
-        // is not a plain JS array and breaks index access in some contexts.
-        const all = await $$('//List[@ClassName="SysListView32"]//ListItem') as unknown as WebdriverIO.Element[];
-        const result: WebdriverIO.Element[] = [];
-        for (let i = 0; i < all.length; i++) {
-            result.push(all[i]);
+        const toArray = async (xpath: string): Promise<WebdriverIO.Element[]> => {
+            try {
+                const raw = await $$(xpath) as unknown as WebdriverIO.Element[];
+                const arr: WebdriverIO.Element[] = [];
+                for (let i = 0; i < raw.length; i++) arr.push(raw[i]);
+                return arr;
+            } catch {
+                return [];
+            }
+        };
+
+        // Strategy 1: standard SysListView32 (original)
+        let items = await toArray('//List[@ClassName="SysListView32"]//ListItem');
+        if (items.length > 0) {
+            console.log(`[Debug] Strategy 1 (SysListView32//ListItem): ${items.length} items`);
+            return items;
         }
-        return result;
+
+        // Strategy 2: IDM uses AutomationId="1002" for the main download list on some versions
+        items = await toArray('//List[@AutomationId="1002"]//ListItem');
+        if (items.length > 0) {
+            console.log(`[Debug] Strategy 2 (AutomationId=1002//ListItem): ${items.length} items`);
+            return items;
+        }
+
+        // Strategy 3: any List's ListItems (broader search)
+        items = await toArray('//List//ListItem');
+        if (items.length > 0) {
+            console.log(`[Debug] Strategy 3 (//List//ListItem): ${items.length} items`);
+            return items;
+        }
+
+        // Strategy 4: global ListItem search
+        items = await toArray('//ListItem');
+        if (items.length > 0) {
+            console.log(`[Debug] Strategy 4 (//ListItem): ${items.length} items`);
+            return items;
+        }
+
+        // Strategy 5: DataItem — some WinAppDriver versions expose SysListView32
+        // rows as DataItem instead of ListItem (depends on UIA provider version)
+        items = await toArray('//DataItem');
+        if (items.length > 0) {
+            console.log(`[Debug] Strategy 5 (//DataItem): ${items.length} items`);
+            return items;
+        }
+
+        console.log('[Debug] All 5 selector strategies returned 0 items');
+        return [];
     }
 
     /**
