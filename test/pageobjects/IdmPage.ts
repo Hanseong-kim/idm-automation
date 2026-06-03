@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { DownloadItem } from '../../src/agent/types';
-import { execSync } from 'child_process';
+
 
 const DEBUG_MODE = process.env['DEBUG_MODE'] === 'true';
 
@@ -25,6 +25,21 @@ const SEL = {
     CTX_COPY_URL:      ['~Copy download link', '~Copy URL'] as const,
     CTX_REMOVE:        ['~Remove from list', '~Remove']     as const,
     CTX_OPEN_LOCATION: ['~Open file location', '~Open folder'] as const,
+} as const;
+
+// ---------------------------------------------------------------------------
+// IDM Dialog Identification Map
+// IDM uses Win32 ClassName="#32770" for EVERY popup: URL input, File Info,
+// error/warning, confirmation, etc. Window class and title alone cannot
+// distinguish them. We identify each dialog by the distinctive UI element it
+// contains. Use these selectors as "dialog type probes" instead of bare #32770.
+// ---------------------------------------------------------------------------
+const IDM_DIALOG = {
+    BASE:      '//Window[@ClassName="#32770"]',
+    // URL Input dialog  → probe: has an Edit textbox (the URL entry field)
+    URL_EDIT:  '//Window[@ClassName="#32770"]//Edit',
+    // File Info dialog  → probe: has a "Start Download" action button
+    START_BTN: '//Window[@ClassName="#32770"]//Button[@Name="Start Download" or @Name="다운로드 시작" or @Name="시작"]',
 } as const;
 
 const COMPLETED_STATUSES = ['Complete', 'Completed', 'Done', 'Finished', '100%'];
@@ -657,48 +672,38 @@ export class IdmPage {
         console.log('[IDMPage] Clicking "Add URL" button...');
         await this.clickToolbarButton(SEL.TB_ADD_URL);
 
-        // 2. Wait for URL input dialog to be fully visible (not just present in DOM)
-        const addressDialog = await $('//Window[@ClassName="#32770"]');
-        await addressDialog.waitForDisplayed({ timeout: 5000 });
+        // 2. Identify URL input dialog by its Edit element (IDM_DIALOG.URL_EDIT).
+        //    All IDM dialogs share #32770 — we target the Edit field as the type probe.
+        const urlInput = await $(IDM_DIALOG.URL_EDIT);
+        await urlInput.waitForDisplayed({ timeout: 5000 });
 
-        const editBox = await addressDialog.$('.//Edit');
-        await editBox.waitForDisplayed({ timeout: 5000 });
+        // 3. Force OS focus to the textbox, then write URL directly via WebdriverIO.
+        //    setValue() clicks, clears, and types in one atomic call — no PowerShell needed.
+        console.log('[IDMPage] Setting URL value...');
+        await urlInput.click();
+        await urlInput.setValue(url);
 
-        await editBox.click();
-        await browser.pause(500);
-
-        // 3. Paste URL via PowerShell clipboard (bypasses WinAppDriver text-input bug)
-        console.log('[IDMPage] Pasting URL via Native OS PowerShell...');
-        const psCommand = `Set-Clipboard -Value '${url}'; Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('^a^v')`;
-        execSync(`powershell -command "${psCommand}"`);
-
-        await browser.pause(800);
-
-        // 4. Click OK, then wait for the URL input dialog to CLOSE before proceeding
+        // 4. Wait for OK button to be fully rendered and clickable before pressing it.
+        //    waitForClickable() prevents Ghost Clicks (clicking before the button is ready).
+        const addressDialog = await $(IDM_DIALOG.BASE);
         const okBtn = await addressDialog.$('.//Button[@Name="OK" or @Name="확인"]');
+        await okBtn.waitForClickable({ timeout: 5000 });
         await okBtn.click();
-        await addressDialog.waitForExist({ timeout: 5000, reverse: true });
 
-        // 5. Handle any intermediate warning dialogs (e.g., duplicate URL warnings)
+        // 5. Verify the URL input dialog closed — key on Edit probe vanishing, NOT on
+        //    #32770 vanishing, because the File Info dialog (also #32770) may appear
+        //    immediately and cause a false positive.
+        await urlInput.waitForExist({ reverse: true, timeout: 5000 });
+
+        // 6. Handle any intermediate warning dialogs (e.g., duplicate URL warnings)
         await this.handleUnexpectedDialog("I want to add and start downloading this URL file.");
 
-        // 6. Wait for the File Info dialog, then click 'Start Download' scoped to it (not global screen)
-        console.log('[IDMPage] Looking for Download File Info dialog...');
+        // 7. Identify File Info dialog by its "Start Download" button (IDM_DIALOG.START_BTN),
+        //    wait for it to be clickable, then press it.
+        console.log('[IDMPage] Waiting for Download File Info dialog (Start Download button probe)...');
         try {
-            await browser.waitUntil(
-                async () => {
-                    try {
-                        const d = await $('//Window[@ClassName="#32770"]');
-                        return await d.isDisplayed();
-                    } catch {
-                        return false;
-                    }
-                },
-                { timeout: 5000, interval: 500, timeoutMsg: '' }
-            );
-            const fileInfoDialog = await $('//Window[@ClassName="#32770"]');
-            const startBtn = await fileInfoDialog.$('.//Button[@Name="Start Download" or @Name="다운로드 시작" or @Name="시작"]');
-            await startBtn.waitForDisplayed({ timeout: 3000 });
+            const startBtn = await $(IDM_DIALOG.START_BTN);
+            await startBtn.waitForClickable({ timeout: 8000 });
             await startBtn.click();
             console.log('[IDMPage] "Start Download" clicked successfully.');
         } catch {
@@ -710,6 +715,15 @@ export class IdmPage {
     // -----------------------------------------------------------------------
     // Bonus Feature: Self-Healing Automation (UI Tree OCR + LLM)
     // -----------------------------------------------------------------------
+    //
+    // ⚠️  IDM Dialog Domain Rule (read before modifying this method):
+    //   IDM uses Win32 ClassName="#32770" for EVERY popup window — URL input,
+    //   File Info, duplicate warning, error alert, confirmation, etc.
+    //   You CANNOT distinguish dialogs by ClassName or window title alone.
+    //   Always inspect the INTERNAL elements (buttons, text nodes, Edit fields)
+    //   to infer the dialog's purpose before deciding which button to click.
+    //   See IDM_DIALOG constants at the top of this file for the typed probes.
+    //
     async handleUnexpectedDialog(intent: string): Promise<boolean> {
         console.log('[Self-Healing] Scanning for unexpected dialogs...');
         try {
