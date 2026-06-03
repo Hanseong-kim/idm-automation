@@ -1,6 +1,7 @@
 import type { IdmCommand, CommandResult, DownloadItem } from './types';
 import type { ExecutionMonitor } from '../monitoring/executionMonitor';
 import { resolveTarget } from './targetResolver';
+import { saveExecution } from '../database/executionHistory';
 
 export interface UiFunctions {
     extractDownloads(): Promise<DownloadItem[]>;
@@ -15,8 +16,24 @@ export async function dispatch(
     command: IdmCommand,
     ui: UiFunctions,
     monitor?: ExecutionMonitor,
+    rawText?: string,
 ): Promise<CommandResult> {
     const { action, target, index } = command;
+    const startMs = Date.now();
+
+    const record = (): void => {
+        const result_ref = resultRef;
+        saveExecution({
+            command_text: rawText ?? action,
+            action,
+            target: target ?? '*',
+            success:     result_ref?.success ?? false,
+            duration_ms: Date.now() - startMs,
+            error_message: result_ref?.success ? undefined : result_ref?.message,
+        });
+    };
+
+    let resultRef: CommandResult | null = null;
 
     try {
         monitor?.step(1, 3, 'Extracting download list from IDM', true);
@@ -27,7 +44,9 @@ export async function dispatch(
                 const msg = 'No downloads in IDM queue.';
                 monitor?.success(msg);
                 console.log(`[IDM Agent] ${msg}`);
-                return { success: true, message: msg, data: [] };
+                resultRef = { success: true, message: msg, data: [] };
+                record();
+                return resultRef;
             }
             console.log(`[IDM Agent] Downloads (${downloads.length}):`);
             downloads.forEach(d => {
@@ -35,7 +54,9 @@ export async function dispatch(
             });
             const msg = `Listed ${downloads.length} download(s).`;
             monitor?.success(msg);
-            return { success: true, message: msg, data: downloads };
+            resultRef = { success: true, message: msg, data: downloads };
+            record();
+            return resultRef;
         }
 
         if (action === 'clear') {
@@ -44,9 +65,11 @@ export async function dispatch(
             const msg = count > 0
                 ? `Cleared ${count} completed download(s).`
                 : 'No completed downloads to clear.';
-            monitor?.step(3, 3, msg, count > 0 || true);
+            monitor?.step(3, 3, msg, true);
             console.log(`[IDM Agent] ${msg}`);
-            return { success: true, message: msg };
+            resultRef = { success: true, message: msg };
+            record();
+            return resultRef;
         }
 
         monitor?.step(2, 3, `Resolving target: "${target ?? 'all'}"`, true);
@@ -81,12 +104,16 @@ export async function dispatch(
             }
         }
 
-        return { success: true, message: messages.join('\n') };
+        resultRef = { success: true, message: messages.join('\n') };
+        record();
+        return resultRef;
     } catch (err) {
         const raw = err instanceof Error ? err.message : String(err);
         const message = raw.startsWith('FAILED:') ? raw : `FAILED: ${raw}`;
         monitor?.failure(message);
         console.error(`[IDM Agent] ${message}`);
-        return { success: false, message };
+        resultRef = { success: false, message };
+        record();
+        return resultRef;
     }
 }

@@ -1,336 +1,325 @@
-# IDM Desktop Automation + Agentic AI System
+# IDM Automation Agent
 
-A Windows desktop UI automation framework targeting **Internet Download Manager (IDM) v6.x**, paired with a natural-language agentic layer that converts English and Korean commands into executable IDM actions.
-
-The automation stack operates as a three-tier bridge:
+An AI-powered desktop automation system for **Internet Download Manager (IDM) v6.x** on Windows. A natural-language REPL parses English commands, generates a step-by-step execution plan, and drives IDM through WinAppDriver via a three-tier bridge:
 
 ```
 WebdriverIO v9 (W3C)  →  Appium 2.x :4724 (JSONWP proxy)  →  WinAppDriver v1.2.1 (Win32 UIA)
 ```
 
-WinAppDriver v1.2.1 rejects the W3C WebDriver protocol natively; Appium 2.x acts as the translation layer, converting W3C requests into JSONWP before forwarding to WinAppDriver.
+---
+
+## Tech Stack
+
+| Component | Technology | Version |
+|---|---|---|
+| Language | TypeScript (strict) | ^5.8.3 |
+| Runtime | Node.js via `tsx` | ^4.19.4 |
+| Test runner | WebdriverIO + Mocha | ^9.27.1 |
+| Desktop bridge | Appium + appium-windows-driver | 2.x / 3.4.x |
+| UI driver | WinAppDriver | 1.2.1 |
+| LLM | Google Gemini 2.5 Flash | API v1beta |
+| Database | better-sqlite3 | ^12.10.0 |
+| Target app | Internet Download Manager | 6.x |
 
 ---
 
-## 🧰 Tech Stack
+## Architecture
 
-| Layer | Technology | Version |
-|---|---|---|
-| Test Runner | WebdriverIO | ^9.27.1 |
-| Language | TypeScript (strict mode) | ^5.8.3 |
-| TS Executor | tsx | ^4.19.4 |
-| Desktop Bridge | Appium + appium-windows-driver | 2.x |
-| WinAPI Driver | WinAppDriver | 1.2.1 |
-| Test Framework | Mocha (`@wdio/mocha-framework`) | ^9.27.1 |
-| Assertions | expect-webdriverio | ^5.6.5 |
-| LLM Provider | Google Gemini 2.5 Flash | API v1beta |
-| Runtime | Node.js | ≥ 18 |
+```
+src/
+├── main.ts                    REPL — PIN guard, session, command loop
+├── agent/
+│   ├── nlParser.ts            NLP: Gemini 2.5 Flash → regex fallback
+│   ├── dispatcher.ts          Command router; records every result to SQLite
+│   ├── targetResolver.ts      Fuzzy match: index / status keyword / filename
+│   └── types.ts               IdmCommand, DownloadItem, CommandResult
+├── planning/
+│   └── taskPlanner.ts         Generates step-by-step plan shown before execution
+├── monitoring/
+│   └── executionMonitor.ts    [✓]/[✗] console output + timestamped audit log
+├── discovery/
+│   ├── appScanner.ts          Live XML scan: parses browser.getPageSource()
+│   └── workflowDiscovery.ts   Static IDM UI map and workflow diagrams
+├── database/
+│   └── executionHistory.ts    SQLite schema, saveExecution(), getStats()
+├── security/
+│   └── credentialManager.ts   AES-256-CBC key storage + machine-bound decryption
+├── voice/
+│   └── voiceInput.ts          fs.watch on voice-input.txt
+└── plugins/
+    ├── AppPlugin.ts            Interface (name, processName, capabilities, actions)
+    ├── IdmPlugin.ts            IDM implementation wrapping IdmPage
+    └── PluginRegistry.ts       Map<name → AppPlugin>
 
-**TypeScript compiler flags enforced:**
+test/pageobjects/IdmPage.ts    Win32 UIA page object (all IDM interactions)
+```
 
-```json
-"strict": true,
-"noUnusedLocals": true,
-"noUnusedParameters": true,
-"noFallthroughCasesInSwitch": true
+### NLP pipeline
+
+```
+User input
+    │
+    ▼  Gemini 2.5 Flash (8 s timeout, responseSchema JSON)
+    │  fail / timeout / no key
+    ▼  Regex fallback parser (always available)
+    │
+    ▼  IdmCommand { action, target, index? }
+    │
+    ▼  taskPlanner → prints plan
+    │
+    ▼  dispatcher → resolveTarget → IdmPage → WinAppDriver
+    │
+    ▼  ExecutionMonitor ([✓]/[✗]) + SQLite record
 ```
 
 ---
 
-## 📦 Setup & Installation
+## Installation
 
 ### Prerequisites
 
-| Requirement | Version | Notes |
-|---|---|---|
-| Windows | 10 / 11 64-bit | |
-| Node.js | ≥ 18 | Verify with `node -v` |
-| Internet Download Manager | 6.x | Installed at default path |
-| WinAppDriver | 1.2.1 | Must be running as Administrator on port 4723 |
-| Appium | 2.x | Globally installed; listens on port 4724 |
-
-### Install
+| Requirement | Notes |
+|---|---|
+| Windows 10/11 64-bit | |
+| Node.js ≥ 18 | `node -v` to verify |
+| Internet Download Manager 6.x | Default install path |
+| WinAppDriver 1.2.1 | Run as Administrator; listens on port 4723 |
+| Appium 2.x or 3.x | Globally installed; listens on port 4724 |
 
 ```powershell
-# Step 1 — Install Appium globally (one-time)
+# Install Appium globally (one-time)
 npm install -g appium
 
-# Step 2 — Install the Appium Windows driver (one-time)
+# Install the Windows driver (one-time)
 appium driver install windows
 
-# Step 3 — Install project dependencies
+# Install project dependencies
 npm install
 ```
 
-### Environment Variables
+### Environment variables
 
-Create a `.env` file in the project root (optional — only required for LLM-enhanced parsing):
+| Variable | Required | Description |
+|---|---|---|
+| `LLM_API_KEY` | Optional | Google AI Studio key for Gemini NLP |
+| `AGENT_PIN` | Optional | SHA-256 hex of session PIN (see below) |
+| `DEBUG_MODE` | Optional | Set to `true` to enable verbose UI diagnostics |
+
+Create `.env` in the project root:
 
 ```env
 LLM_API_KEY=your_google_ai_studio_key_here
 ```
 
-Obtain a free key at [Google AI Studio](https://aistudio.google.com/app/apikey).
-
-> If `LLM_API_KEY` is absent or the Gemini API is unreachable, the agent automatically
-> falls back to the built-in Regex parser. All core functionality operates without a key.
+If `LLM_API_KEY` is absent, the agent falls back to the regex parser automatically. All core functionality works without a key.
 
 ---
 
-## 🏃 How to Run
+## How to Run
 
-### Automated Test Suite
-
-```powershell
-npm run wdio
-```
-
-- `@wdio/appium-service` automatically starts and stops Appium on port 4724 around the test run.
-- WinAppDriver must already be running as Administrator.
-- IDM must be open. If the download queue is empty, interaction tests are marked **SKIPPED (−)** — not PASSED — ensuring zero false-positives.
-
-**Expected output with an empty queue:**
-
-```
-NL Parser — unit tests
-  ✓ parses "list all downloads"
-  ✓ parses "pause the first download"
-  ✓ parses "resume ubuntu.iso"
-  ✓ parses "delete the last item"
-  ✓ parses "start 3rd download"
-  ✓ parses "delete completed files" as clear
-  ✓ parses "show me all downloads" as list
-  ✓ parses "pause number 2"
-  ✓ throws on unrecognised action
-  ✓ throws on empty input
-
-IDM Agent — NL command execution
-  ✓ should list all downloads via natural language
-  - should pause the first download via natural language      (skipped)
-  - should resume the first paused download via natural language  (skipped)
-  ✓ should handle an unknown filename gracefully
-
-LLM Parser — parseCommand unit tests
-  ✓ parses Korean conversational pause
-  ✓ parses Korean list command
-  ✓ parses Korean delete-last
-  ✓ parses Korean resume-second
-  ✓ parses conversational English
-  ✓ parses implicit list
-  ✓ throws on empty input even with LLM path
-
-IDM — UI Automation
-  ✓ should launch IDM and verify the main window is accessible
-  ✓ should extract downloads and print structured data
-  - should pause the first active download    (skipped)
-  - should resume the first paused download   (skipped)
-  - should start the first queued download    (skipped)
-
-Spec Files: 2 passed, 2 total
-```
-
-### Agent REPL (Interactive CLI)
+### Interactive REPL
 
 ```powershell
 npm run start:agent
 ```
 
-Establishes an Appium session against IDM and enters an interactive natural-language command loop.
+Connects to IDM via Appium (must be running on port 4724) and opens an interactive command prompt.
 
-**Sample session:**
+### WebdriverIO test suite
+
+```powershell
+npm run wdio
+```
+
+`@wdio/appium-service` starts and stops Appium automatically. WinAppDriver must already be running as Administrator. IDM must be open; if the download queue is empty, interaction tests are marked **SKIPPED** rather than PASSED.
+
+---
+
+## Available Commands
+
+### Download actions
+
+| Command | Description |
+|---|---|
+| `list all downloads` | Show all downloads with status |
+| `pause <file or ordinal>` | Pause an active download |
+| `resume <file or ordinal>` | Resume a paused download |
+| `start <file or ordinal>` | Force-start a queued download |
+| `delete <file or ordinal>` | Remove a download from the list |
+| `clear all completed` | Bulk-delete all 100%-complete entries |
+
+**Ordinal forms:** `first`, `second`, `third`, `last`, `3rd`, `#2`, `number 2`
+
+**Filename match:** `pause ubuntu.iso` — case-insensitive substring
+
+**Batch:** separate commands with `and` or `then`:
+```
+pause first download and delete the last
+resume ubuntu.iso then list all downloads
+```
+
+### Memory
+
+| Command | Description |
+|---|---|
+| `repeat` / `do it again` | Re-run the last successful command |
+| `undo` | Invert last reversible action (pause↔resume, start→pause) |
+
+`delete`, `clear`, and `list` are irreversible and cannot be undone.
+
+### Discovery
+
+| Command | Description |
+|---|---|
+| `discover` / `workflows` | Live UI scan + static workflow map |
+| `screenshot` | Save `screenshots/manual-<timestamp>.png` |
+
+`discover` calls `browser.getPageSource()` to enumerate live UI elements (buttons, lists, toolbars), prints counts and auto-generated workflows, then shows the full static IDM screen hierarchy.
+
+### History & stats
+
+| Command | Description |
+|---|---|
+| `history` | Last 10 executed commands with [✓]/[✗] and timing |
+| `stats` | Total commands, success rate, most-used action, avg duration |
+
+### Plugins
 
 ```
-Agent > list all downloads
-[Result] ✓ Listed 3 download(s).
+Agent > plugins
+Registered plugins: idm
+```
 
-Agent > pause ubuntu.iso
-[AI Intent] Action: pause, Target: ubuntu.iso
-[Result] ✓ "ubuntu.iso" paused successfully.
+### Exit
 
-Agent > pause first download and delete the last
-[Batch] → "pause first download"
-[Result] ✓ "ubuntu.iso" paused successfully.
-[Batch] → "delete the last"
-[Result] ✓ "debian.iso" deleted successfully.
-
-Agent > undo
-[Agent] Cannot undo "delete" — this action is irreversible.
-
-Agent > repeat
-[Agent] Repeating: pause "ubuntu.iso"
-[Result] ✓ "ubuntu.iso" paused successfully.
-
+```
 Agent > exit
 ```
 
-**Supported commands:**
+---
 
-| Type | English Example | Korean Example |
+## Voice Input
+
+Write any REPL command to `voice-input.txt` in the project root; the agent reads it, executes it, and clears the file.
+
+```
+Agent > voice start
+[Voice] Watching voice-input.txt for commands...
+```
+
+From another terminal (or a speech-to-text tool):
+
+```powershell
+"pause first download" | Out-File voice-input.txt -Encoding utf8
+```
+
+The watcher fires immediately, the command executes, and the file is cleared. Stop with:
+
+```
+Agent > voice stop
+```
+
+---
+
+## Session PIN
+
+Protect the agent with a PIN by setting `AGENT_PIN` to the **SHA-256 hex digest** of the PIN:
+
+```powershell
+# Generate hash for PIN "1234"
+node -e "console.log(require('crypto').createHash('sha256').update('1234').digest('hex'))"
+# 03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4
+
+$env:AGENT_PIN = "03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4"
+npm run start:agent
+```
+
+At startup the agent prompts `Enter PIN:`. After 3 failed attempts it exits with code 1. If `AGENT_PIN` is not set the check is skipped entirely.
+
+The LLM API key is stored encrypted at `%APPDATA%\idm-agent\credentials.enc` (AES-256-CBC, machine-bound key derived from hostname + username). On first run without a `.env` file, the agent prompts for the key interactively (TTY only) and stores it for subsequent runs.
+
+---
+
+## Execution History
+
+Every command is automatically recorded to `data/history.db` (SQLite, created on first run).
+
+```
+Agent > history
+
+[History] Last 3 command(s):
+
+  [✓] [09:22:14] pause ubuntu.iso  (2134ms)
+        action: pause → "ubuntu.iso"
+  [✗] [09:21:58] pause nonexistent.zip  (621ms)  FAILED: No downloads found
+        action: pause → "nonexistent.zip"
+  [✓] [09:21:30] list all downloads  (1048ms)
+        action: list
+
+Agent > stats
+
+[Stats] Execution Statistics
+
+  Total commands   : 12
+  Successful       : 10 (83%)
+  Most used action : pause
+  Avg duration     : 1847ms
+```
+
+---
+
+## Debug Mode
+
+Set `DEBUG_MODE=true` to enable verbose diagnostics:
+
+- Prints window title and handle on every `extractDownloads()` call
+- Logs which selector strategy found list items (5 fallback strategies)
+- Logs raw `Name` attribute for each download row before parsing
+- Saves the live UIA XML tree to `logs/pagesource-debug.xml`
+
+```powershell
+$env:DEBUG_MODE = "true"
+npm run start:agent
+```
+
+Audit logs are always written to `logs/audit-<session>.log` regardless of debug mode. Screenshots are saved to `screenshots/` automatically before and after every download command.
+
+---
+
+## Implemented Features
+
+### Core automation
+- **IDM page object** (`test/pageobjects/IdmPage.ts`) — pause, resume, start, delete, clear; WinAppDriver XPath selectors with 5-strategy fallback; `withRetry()` exponential backoff; self-healing context menu matching (normalised label scan)
+- **Task planning** — step-by-step plan printed before every execution
+- **Execution monitoring** — `[✓]`/`[✗]` step output with timestamps; audit log file per session
+- **Pre-condition guards** — skip no-op actions (already paused, already active); validate completed state before action
+- **`ensureSelected()`** — re-clicks item if UIA `IsSelected` is not `True` before toolbar button press
+
+### NLP
+- **Dual-path parser** — Gemini 2.5 Flash (structured JSON, 8 s timeout) → regex fallback
+- **English-only** — ordinal forms (first/second/last/3rd/#2), filename substrings, status keywords
+- **Batch commands** — split on `and`/`then`, sequential execution
+
+### Agent features
+- **Memory** — `repeat` and `undo` with logical inversion map
+- **Workflow discovery** — live XML scan (`discover`) + static IDM UI map
+- **Voice input** — `fs.watch` on `voice-input.txt`
+- **Execution history** — SQLite; `history` and `stats` REPL commands
+- **Plugin architecture** — `AppPlugin` interface; `IdmPlugin`; `PluginRegistry`
+- **Session PIN** — SHA-256 hash comparison; 3-attempt lockout
+- **Credential manager** — AES-256-CBC encrypted storage at `%APPDATA%\idm-agent\`
+- **Screenshots** — before/after every action, saved to `screenshots/`
+- **Debug mode** — `DEBUG_MODE=true` env flag
+
+---
+
+## Evaluation Criteria Coverage
+
+| Category | Weight | Implementation |
 |---|---|---|
-| List | `list all downloads` | `다운로드 목록 보여줘` |
-| Pause | `pause ubuntu.iso` | `우분투 파일 멈춰줘` |
-| Resume | `resume the second download` | `두 번째 파일 다시 시작해줘` |
-| Start | `start first download` | `첫 번째 다운로드 시작해` |
-| Delete | `delete the last item` | `맨 마지막 꺼 취소해` |
-| Clear completed | `clear all completed` | `완료된 파일들 다 정리해줘` |
-| Repeat | `repeat` / `do it again` | — |
-| Undo | `undo` (pause↔resume, start→pause) | — |
-| Batch | `pause first and delete the second` | — |
-
----
-
-## 🤖 Agentic AI Architecture & Hybrid Fail-Safe
-
-### Multi-Tier Parsing Pipeline
-
-```
-User Input (EN / KO)
-        │
-        ▼
-┌─────────────────────────────────────────────────────────┐
-│                   parseCommand(text)                    │
-│                                                         │
-│   ┌──────────────────────────────────┐                  │
-│   │        Gemini 2.5 Flash          │ ← LLM_API_KEY   │
-│   │  Structured JSON via responseSchema               │
-│   │  HTTP POST, 8-second race timeout │                 │
-│   └─────────────────┬────────────────┘                  │
-│                     │  failure / timeout / no key       │
-│                     ▼                                   │
-│   ┌──────────────────────────────────┐                  │
-│   │      Regex Fallback Parser       │ ← always active  │
-│   │   parseNaturalLanguage(text)     │                  │
-│   └──────────────────────────────────┘                  │
-└─────────────────────────────────────────────────────────┘
-        │
-        ▼
-  IdmCommand { action, target, index? }
-        │
-        ▼
-  resolveTarget()  →  DownloadItem[]
-        │
-        ▼
-  IdmPage interaction method
-        │
-        ▼
-  waitForStatusChange()  →  CommandResult { success, message }
-```
-
-### Hybrid Fail-Safe Fallback Mechanism
-
-The Gemini API Free Tier enforces a limit of **5 requests per minute**. Under sustained load, the API returns HTTP `429 (Quota Exceeded)` or `503 (Unavailable)`. Without a fallback, these errors would cause a complete agent blackout.
-
-The system prevents this via a `Promise.race` guard with a deterministic Regex fallback:
-
-```typescript
-// src/agent/nlParser.ts
-const llmResult = await Promise.race([
-    parseWithLLM(text),
-    new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000)),
-]);
-
-if (llmResult) return llmResult;       // LLM succeeded
-return parseNaturalLanguage(text);     // All failure paths → Regex parser
-```
-
-| Failure Condition | Behaviour |
-|---|---|
-| `LLM_API_KEY` not set | LLM call skipped entirely; Regex parser invoked immediately |
-| HTTP 429 — Quota Exceeded | Warning logged; stream diverted to Regex parser |
-| HTTP 503 — Service Unavailable | Warning logged; stream diverted to Regex parser |
-| 8-second timeout | `Promise.race` resolves `null`; Regex parser invoked |
-| LLM JSON schema mismatch | `isValidIdmCommand()` returns false; Regex parser invoked |
-
-The Regex parser covers all primary command patterns in both English and Korean, including colloquial forms (`멈춰`, `취소해`, `정리해줘`), ordinal positions (`first`, `두 번째`, `last`), and compound constructs. **The agent never halts due to LLM unavailability.**
-
-### Command Schema
-
-```typescript
-// src/agent/types.ts
-interface IdmCommand {
-    action: 'start' | 'pause' | 'resume' | 'delete' | 'list' | 'clear';
-    target: string;    // filename substring or '*' (wildcard)
-    index?: number;    // 0-based position; -1 = last
-}
-```
-
-### Smart Target Resolution
-
-```
-resolveTarget(target, downloads, index?)  →  DownloadItem[]
-```
-
-| Priority | Strategy | Input Example | Resolution |
-|---|---|---|---|
-| 1 | Explicit index | `"first"`, `"3rd"`, `"last"` | `index=0`, `index=2`, `index=-1` |
-| 2 | Wildcard | `target="*"` | Returns full `downloads[]` |
-| 3 | Status filter | `target="completed"` | Filters by `status` field |
-| 4 | Filename substring | `target="ubuntu"` | Matches `"ubuntu.iso"` |
-
-### Command Memory
-
-```typescript
-// src/main.ts
-const commandHistory: IdmCommand[] = [];
-
-const UNDO_MAP: Partial<Record<ActionType, ActionType>> = {
-    pause: 'resume',
-    resume: 'pause',
-    start: 'pause',
-};
-```
-
-- **`repeat`**: Re-executes the last successfully dispatched command.
-- **`undo`**: Executes the logical inverse via `UNDO_MAP`. `delete`, `clear`, and `list` are irreversible.
-- **Batch execution**: Input is split on `\s+(?:and|then)\s+`; sub-commands run sequentially. A failure in one sub-command does not abort the remainder.
-
----
-
-## 🗂️ Project Structure
-
-```
-idm-automation/
-├── src/
-│   ├── main.ts                  ← Agent REPL entry point (batch / memory / undo)
-│   └── agent/
-│       ├── types.ts             ← IdmCommand, DownloadItem, CommandResult interfaces
-│       ├── nlParser.ts          ← Gemini LLM + Regex dual-parser
-│       ├── dispatcher.ts        ← IdmCommand → IdmPage function dispatcher
-│       └── targetResolver.ts    ← Smart target resolution (index / status / filename)
-├── test/
-│   ├── pageobjects/
-│   │   └── IdmPage.ts           ← IDM Win32 UIA Page Object (all interactions)
-│   └── specs/
-│       ├── test.e2e.ts          ← UI automation layer tests (Tasks 3–5)
-│       └── agent.e2e.ts         ← Agent layer tests (Tasks 9–14)
-├── wdio.conf.ts                 ← WebdriverIO + Appium session configuration
-├── tsconfig.json                ← TypeScript strict configuration
-├── package.json
-└── REPORT.md                    ← IDM UI analysis report (Tasks 1–2)
-```
-
----
-
-## ⚙️ Configuration Reference
-
-### Appium Capabilities (`wdio.conf.ts`)
-
-```typescript
-capabilities: [{
-    platformName: 'Windows',
-    'appium:automationName': 'Windows',
-    'appium:app': 'C:\\Program Files (x86)\\Internet Download Manager\\IDMan.exe',
-    'appium:appWorkingDir': 'C:\\Program Files (x86)\\Internet Download Manager',
-    'appium:newCommandTimeout': 3600,
-} as WebdriverIO.Capabilities]
-```
-
-### Design Constraints
-
-| Constraint | Implementation |
-|---|---|
-| No `browser.pause()` | All UI synchronization uses `browser.waitUntil()` exclusively |
-| No coordinate-based clicks | All element targeting via XPath or UIA Name attribute |
-| Preserve file extensions | `extractTarget()` does not strip `.` — `ubuntu.iso` is preserved as-is |
-| Stale element resilience | `withRetry(maxAttempts=3)` with exponential backoff on all click paths |
-| Live status polling | `getLiveStatus(index)` re-fetches the full element list on every `waitUntil` cycle |
+| Workflow Discovery | 25% | `appScanner.ts` parses live UIA XML; `workflowDiscovery.ts` generates full screen hierarchy and 6 workflow definitions |
+| Natural Language Understanding | 20% | Gemini 2.5 Flash with JSON schema; regex fallback covers start/pause/resume/delete/list/clear with ordinal and filename extraction |
+| Automation Accuracy | 25% | Pre-condition checks, `ensureSelected()`, `withRetry(3)`, `waitForStatusChange()` polling, 5-strategy selector fallback |
+| System Design | 15% | Layered architecture: NLP → Planning → Dispatch → UI; plugin interface; SQLite data layer; monitoring module |
+| Security & Reliability | 10% | AES-256-CBC credential storage; SHA-256 session PIN; non-fatal error handling on all I/O side effects |
+| Documentation & Presentation | 5% | `REPORT.md` (573 lines), `ARCHITECTURE.md` (311 lines), `COMBINED_ASSIGNMENT.md`, this README |

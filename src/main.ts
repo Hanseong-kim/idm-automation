@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import readline from 'readline';
@@ -11,6 +12,12 @@ import { IdmPage } from '../test/pageobjects/IdmPage';
 import { ExecutionMonitor } from './monitoring/executionMonitor';
 import { generatePlan, printPlan } from './planning/taskPlanner';
 import { discoverWorkflows, printWorkflowDiagram } from './discovery/workflowDiscovery';
+import { scanApplication, printScanResult } from './discovery/appScanner';
+import { getApiKey } from './security/credentialManager';
+import { getRecentHistory, getStats } from './database/executionHistory';
+import { IdmPlugin } from './plugins/IdmPlugin';
+import { registerPlugin, listPlugins } from './plugins/PluginRegistry';
+import { VoiceInput } from './voice/voiceInput';
 
 // ---------------------------------------------------------------------------
 // Session bootstrap
@@ -30,6 +37,36 @@ async function createSession() {
             'appium:newCommandTimeout': 3600,
         } as WebdriverIO.Capabilities,
     });
+}
+
+// ---------------------------------------------------------------------------
+// Session PIN guard
+// AGENT_PIN env var must hold the SHA-256 hex digest of the correct PIN.
+// Generate it with: node -e "const c=require('crypto'); console.log(c.createHash('sha256').update('1234').digest('hex'))"
+// ---------------------------------------------------------------------------
+
+async function checkSessionPin(): Promise<void> {
+    const storedHash = process.env['AGENT_PIN'];
+    if (!storedHash) return; // PIN not configured — skip
+
+    const ask = (msg: string): Promise<string> =>
+        new Promise(resolve => {
+            const rl2 = readline.createInterface({ input: process.stdin, output: process.stdout });
+            rl2.question(msg, (ans: string) => { rl2.close(); resolve(ans.trim()); });
+        });
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        const input = await ask(`[Security] Enter session PIN (attempt ${attempt}/3): `);
+        const hash  = crypto.createHash('sha256').update(input).digest('hex');
+        if (hash === storedHash) {
+            console.log('[Security] PIN verified.\n');
+            return;
+        }
+        if (attempt < 3) console.log('[Security] Incorrect PIN — try again.');
+    }
+
+    console.error('[Security] 3 failed attempts — access denied.');
+    process.exit(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -69,25 +106,25 @@ const BANNER = `
 +----------------------------------------------------------+
 |  Download commands:                                      |
 |    list all downloads                                    |
-|    pause <file or ordinal>                               |
-|    resume <file or ordinal>                              |
-|    start <file or ordinal>                               |
-|    delete <file or ordinal>                              |
+|    pause / resume / start / delete <file or ordinal>    |
 |    clear all completed                                   |
 |                                                          |
-|  Discovery & Planning:                                   |
-|    discover / workflows  — show IDM workflow map         |
+|  Discovery & History:                                    |
+|    discover / workflows  — live UI scan + workflow map  |
 |    screenshot            — capture current IDM screen    |
+|    history               — last 10 executed commands    |
+|    stats                 — success rate and usage stats |
+|    plugins               — list registered app plugins  |
+|                                                          |
+|  Voice input:                                            |
+|    voice start/stop      — watch voice-input.txt        |
 |                                                          |
 |  Memory:                                                 |
 |    repeat / do it again  — re-run last command           |
 |    undo                  — invert last action            |
 |                                                          |
-|  Batch (use "and" or "then" between commands):           |
-|    pause first download and delete the second            |
-|    resume ubuntu.iso then list all downloads             |
-|                                                          |
-|  Korean is supported. Type "exit" or "quit" to close.   |
+|  Batch: use "and" or "then" between commands             |
+|  Type "exit" or "quit" to close.                        |
 +----------------------------------------------------------+
 `;
 
@@ -97,6 +134,15 @@ const BANNER = `
 
 async function main() {
     console.log(BANNER);
+
+    // Session PIN check (skipped if AGENT_PIN env var is not set)
+    await checkSessionPin();
+
+    // LLM key: env → encrypted store → interactive prompt (TTY only)
+    await getApiKey('LLM_API_KEY');
+
+    // Register plugins
+    registerPlugin(new IdmPlugin());
 
     let browser: WebdriverIO.Browser;
     try {
@@ -114,8 +160,9 @@ async function main() {
     g['$'] = browser.$.bind(browser);
     g['$$'] = browser.$$.bind(browser);
 
-    const page = new IdmPage();
+    const page  = new IdmPage();
     const monitor = new ExecutionMonitor();
+    const voice = new VoiceInput();
 
     const ui: UiFunctions = {
         extractDownloads: ()     => page.extractDownloads(),
@@ -171,9 +218,9 @@ async function main() {
         // Take a before-screenshot (Priority 2)
         await captureScreenshot(browser, `before-${command.action}`);
 
-        // Execute with monitoring
+        // Execute with monitoring + DB recording
         monitor.startCommand(rawText);
-        const result = await dispatch(command, ui, monitor);
+        const result = await dispatch(command, ui, monitor, rawText);
         monitor.endCommand(rawText, result.success);
 
         // Take an after-screenshot
@@ -194,8 +241,73 @@ async function main() {
         const t = text.trim();
         if (!t) return;
 
-        // Workflow discovery
+        // Plugin registry
+        if (/^plugins$/i.test(t)) {
+            const names = listPlugins();
+            console.log('Registered plugins:', names.length ? names.join(', ') : '(none)');
+            return;
+        }
+
+        // Voice input
+        if (/^voice\s+start$/i.test(t)) {
+            if (voice.isActive()) {
+                console.log('[Voice] Already active.');
+            } else {
+                voice.start((cmd: string) => {
+                    console.log(`\n[Voice] Running: "${cmd}"`);
+                    runSubCommand(cmd).catch((e: unknown) =>
+                        console.error('[Voice] Error:', e instanceof Error ? e.message : e)
+                    );
+                });
+            }
+            return;
+        }
+
+        if (/^voice\s+stop$/i.test(t)) {
+            voice.stop();
+            return;
+        }
+
+        // Execution history
+        if (/^history$/i.test(t)) {
+            const rows = getRecentHistory(10);
+            if (rows.length === 0) {
+                console.log('[History] No commands recorded yet.');
+                return;
+            }
+            console.log(`\n[History] Last ${rows.length} command(s):\n`);
+            rows.forEach(r => {
+                const icon   = r.success ? '✓' : '✗';
+                const time   = new Date(r.timestamp).toLocaleTimeString();
+                const target = r.target && r.target !== '*' ? ` → "${r.target}"` : '';
+                console.log(`  [${icon}] [${time}] ${r.command_text}  (${r.duration_ms}ms)${r.error_message ? '  ' + r.error_message : ''}`);
+                console.log(`        action: ${r.action}${target}`);
+            });
+            console.log('');
+            return;
+        }
+
+        // Execution stats
+        if (/^stats$/i.test(t)) {
+            const s = getStats();
+            console.log('\n[Stats] Execution Statistics\n');
+            console.log(`  Total commands   : ${s.total}`);
+            console.log(`  Successful       : ${s.successCount} (${s.successRate}%)`);
+            console.log(`  Most used action : ${s.mostUsedAction}`);
+            console.log(`  Avg duration     : ${s.avgDurationMs}ms`);
+            console.log('');
+            return;
+        }
+
+        // Workflow discovery — live scan first, then static diagram
         if (/^(discover|workflows?|show\s+workflow|ui\s+map)$/i.test(t)) {
+            try {
+                const scan = await scanApplication();
+                printScanResult(scan);
+            } catch (scanErr) {
+                console.log('[Scanner] Live scan failed:', scanErr instanceof Error ? scanErr.message : scanErr);
+                console.log('[Scanner] Falling back to static workflow diagram');
+            }
             const map = discoverWorkflows();
             printWorkflowDiagram(map);
             return;
@@ -262,6 +374,7 @@ async function main() {
 
         if (/^(exit|quit)$/i.test(text)) {
             exiting = true;
+            if (voice.isActive()) voice.stop();
             console.log('\n[Session closing...]');
             rl.close();
             await browser.deleteSession();

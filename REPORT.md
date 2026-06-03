@@ -78,17 +78,19 @@ Window [ClassName: IEFrame, AutomationId: ""]                  ← session root
 
 | Element | Control Type | Class Name | AutomationId | Locator (XPath) |
 |---|---|---|---|---|
-| Main download list | `List` | `SysListView32` | `""` | `//List[@ClassName="SysListView32"]` |
+| Main download list | `List` | `SysListView32` | `"1002"` | `//List[@ClassName="SysListView32"]` |
 | Download item row | `ListItem` | `""` | `""` | `//List[@ClassName="SysListView32"]//ListItem` |
-| Toolbar panel | `ToolBar` | `ToolbarWindow32` | `""` | `//ToolBar` |
+| Toolbar panel | `ToolBar` | `ToolbarWindow32` | `"59392"` | `//ToolBar` |
 | All toolbar buttons | `Button` / `SplitButton` | `""` | `""` | `//ToolBar/*[self::Button or self::SplitButton]` |
 | Add URL button | `Button` | `""` | `""` | `//ToolBar/*[self::Button or self::SplitButton][1]` |
 | Resume button | `Button` | `""` | `""` | `//ToolBar/*[self::Button or self::SplitButton][2]` |
 | Stop button | `Button` | `""` | `""` | `//ToolBar/*[self::Button or self::SplitButton][3]` |
 | Delete button | `SplitButton` | `""` | `""` | `//ToolBar/*[self::Button or self::SplitButton][5]` |
+| Category tree | `Tree` | `SysTreeView32` | `"1276"` | `//Tree[@AutomationId="1276"]` |
+| Category item | `TreeItem` | `""` | `""` | `//Tree[@AutomationId="1276"]//TreeItem` |
 | Add URL dialog | `Window` | `#32770` | `""` | `//Window[@ClassName="#32770"]` |
-| URL input field | `Edit` | `Edit` | `""` | `//Window[@ClassName="#32770"]//Edit` |
-| OK button | `Button` | `Button` | `""` | `//Window[@ClassName="#32770"]//Button[@Name="OK"]` |
+| URL input field | `Edit` | `Edit` | `""` | `//Window[@ClassName="#32770"]//Edit[1]` |
+| OK / Confirm button | `Button` | `Button` | `""` | `//Window[@ClassName="#32770"]//Button[@Name="확인"]` |
 | Context menu | `Window` | `#32768` | `""` | `//Window[@ClassName="#32768"]` |
 | Context menu item | `MenuItem` | `""` | `""` | `//Window[@ClassName="#32768"]//MenuItem` |
 
@@ -326,3 +328,246 @@ interface IdmCommand {
 | Output Format | `responseMimeType: "application/json"` with `responseSchema` (structured output) |
 | Request Timeout | 8 seconds via `Promise.race`; falls back to Regex parser on expiry |
 | SDK | None — native `fetch` to avoid TypeScript dependency conflicts |
+
+---
+
+## 5. UI Structure — Updated from Live Page Source
+
+### 5-1. Confirmed AutomationIds (IDM 6.42, Korean locale)
+
+The following AutomationId values were confirmed by parsing `browser.getPageSource()` XML on IDM 6.42 running in Korean locale. These supersede the `""` placeholders in earlier documentation.
+
+| Element | ClassName | Confirmed AutomationId | Notes |
+|---|---|---|---|
+| Download list | `SysListView32` | `"1002"` | Main download queue |
+| Category tree | `SysTreeView32` | `"1276"` | Left sidebar navigation |
+| Toolbar panel | `ToolbarWindow32` | `"59392"` | All action buttons |
+| Category close button | `Button` | `"1278"` | Closes category filter |
+| Category label text | `Static` | `"1281"` | Shows "범주" label |
+| Category group border | `Button` (Group) | `"1279"`, `"1280"` | Visual grouping frames |
+
+**Updated primary selector** (using confirmed AutomationId as alternative):
+
+```typescript
+// Preferred — ClassName (version-independent)
+'//List[@ClassName="SysListView32"]//ListItem'
+
+// Alternative — AutomationId (faster lookup, IDM 6.x specific)
+'//List[@AutomationId="1002"]//ListItem'
+```
+
+### 5-2. Category Tabs (SysTreeView32 — Left Sidebar)
+
+IDM organises downloads into categories via a `SysTreeView32` (AutomationId `"1276"`) on the left side of the main window. Selecting a category filters the `SysListView32` to show only matching downloads.
+
+| TreeItem Name (KO) | English Equivalent | Description |
+|---|---|---|
+| `모든 다운로드` | All Downloads | Shows all items regardless of state (default) |
+| `압축` | Compressed | Archives (.zip, .rar, .7z, etc.) |
+| `문서` | Documents | Office, PDF, text files |
+| `음악` | Music | Audio files |
+| `프로그램` | Programs | Executables, installers |
+| `동영상` | Videos | Video files |
+| `미완료` | Incomplete | Downloads in progress or paused |
+| `완료됨` | Completed | Fully downloaded items |
+| `그래버` | Grabber | IDM web grabber results |
+| `대기열` | Queue | Scheduled / queued downloads |
+
+**XPath selector for a specific category:**
+
+```typescript
+// Click a category to filter the list
+const cat = await $('//Tree[@AutomationId="1276"]//TreeItem[@Name="미완료"]');
+await cat.click();
+```
+
+**Note:** The category tree is always visible in the Korean locale. The automation's `extractDownloads()` reads whatever category is currently selected in the tree. To read all downloads, ensure `"모든 다운로드"` is selected before calling `extractDownloads()`.
+
+### 5-3. Add URL Dialog
+
+Triggered by: Toolbar button index 0 (`Add URL`), or Menu `다운로드 → URL 추가`.
+
+| Control | ControlType | ClassName | AutomationId | Selector |
+|---|---|---|---|---|
+| Dialog window | `Window` | `#32770` | `""` | `//Window[@ClassName="#32770"]` |
+| URL input field | `Edit` | `Edit` | `""` | `//Window[@ClassName="#32770"]//Edit[1]` |
+| Save path field | `Edit` | `Edit` | `""` | `//Window[@ClassName="#32770"]//Edit[2]` |
+| Start download | `Button` | `Button` | `""` | `//Window[@ClassName="#32770"]//Button[@Name="확인"]` |
+| Cancel | `Button` | `Button` | `""` | `//Window[@ClassName="#32770"]//Button[@Name="취소"]` |
+| Advanced options | `Button` | `Button` | `""` | `//Window[@ClassName="#32770"]//Button[@Name="고급"]` |
+
+**Usage pattern:**
+
+```typescript
+// Open dialog
+await $('//ToolBar/*[self::Button or self::SplitButton][1]').click();
+// Type URL
+const urlInput = await $('//Window[@ClassName="#32770"]//Edit[1]');
+await urlInput.setValue('https://example.com/file.zip');
+// Confirm
+await $('//Window[@ClassName="#32770"]//Button[@Name="확인"]').click();
+```
+
+---
+
+## 6. Security Architecture
+
+### 6-1. Credential Management
+
+API keys (such as `LLM_API_KEY` for the Gemini NLP provider) are sensitive secrets that must not be stored in plaintext. The project implements a three-tier resolution strategy via `src/security/credentialManager.ts`:
+
+```
+Priority 1  →  Environment variable (process.env.LLM_API_KEY)
+                Highest trust. Supports .env files via dotenv/config.
+                Used in CI/CD pipelines and Docker deployments.
+
+Priority 2  →  Encrypted credential store
+                %APPDATA%\idm-agent\credentials.enc
+                AES-256-CBC encryption. Decryption key derived from
+                machine identity (hostname + username) — credentials
+                are useless on a different machine.
+
+Priority 3  →  Interactive TTY prompt (first-run only)
+                Triggered when neither env var nor file exists.
+                Input is masked (raw mode, no echo).
+                Stored to encrypted file on success.
+```
+
+### 6-2. Encryption Details
+
+| Property | Value |
+|---|---|
+| Algorithm | AES-256-CBC |
+| Key derivation | SHA-256 of `hostname:username:idm-agent-v1` |
+| IV | 16 random bytes, unique per write |
+| Storage format | `<iv-hex>:<ciphertext-hex>` |
+| Store location | `%APPDATA%\idm-agent\credentials.enc` |
+| Key material | **Never logged, printed, or stored in plaintext** |
+
+### 6-3. Security Properties
+
+- **Machine-binding:** Credentials encrypted on machine A cannot be decrypted on machine B.
+- **No plaintext persistence:** The raw API key never touches disk unencrypted.
+- **Environment priority:** CI/CD environments can always override via env var without touching the file.
+- **Non-interactive fallback:** If `stdin` is not a TTY (piped input, automation), the prompt is skipped and the key remains undefined — the NLP layer falls back to the regex parser silently.
+
+### 6-4. API Key Lifecycle
+
+```
+main.ts startup
+    ↓
+getApiKey('LLM_API_KEY')
+    ├── env var present?  → use it (no file I/O)
+    ├── credentials.enc?  → decrypt and use
+    └── TTY available?    → prompt → encrypt → store → use
+                           else → return undefined
+    ↓
+process.env.LLM_API_KEY set for current process
+    ↓
+nlParser.ts reads process.env.LLM_API_KEY as before
+```
+
+---
+
+## 7. Scalability — Plugin Architecture
+
+### 7-1. Design Goal
+
+The automation framework was initially built exclusively for IDM. The plugin architecture decouples the agent core from any single application, allowing new targets to be added without modifying existing code.
+
+### 7-2. Interface Contract
+
+```typescript
+// src/plugins/AppPlugin.ts
+export interface AppPlugin {
+    name: string;        // "IDM", "Notepad", "Chrome"
+    processName: string; // "IDMan.exe", "notepad.exe"
+    capabilities: object;
+    actions: {
+        list(): Promise<unknown[]>;
+        execute(command: string, target: string): Promise<void>;
+    };
+}
+```
+
+### 7-3. Plugin Architecture Diagram
+
+```
+Agent Core  ──uses──►  AppPlugin interface
+                             │
+                   ┌─────────┴──────────┐
+                   ▼                    ▼
+             IdmPlugin            FuturePlugin
+             (IDMan.exe)          (any Win32 app)
+                   │
+                   ▼
+             PluginRegistry
+             Map<name → AppPlugin>
+```
+
+### 7-4. PluginRegistry API
+
+| Method | Signature | Description |
+|---|---|---|
+| `registerPlugin` | `(plugin: AppPlugin) → void` | Add plugin to registry |
+| `getPlugin` | `(name: string) → AppPlugin` | Retrieve by name (throws if absent) |
+| `listPlugins` | `() → string[]` | All registered names |
+
+### 7-5. Adding a New Target Application
+
+1. Create `src/plugins/MyAppPlugin.ts` implementing `AppPlugin`
+2. Provide Appium capabilities for the target `.exe`
+3. Implement `actions.list()` and `actions.execute()`
+4. Call `registerPlugin(new MyAppPlugin())` in `main.ts`
+
+No changes to the NLP layer, dispatcher, or REPL are required.
+
+---
+
+## 8. Data Layer — Execution History
+
+### 8-1. SQLite Schema
+
+Database file: `data/history.db` (created on first run)
+
+```sql
+CREATE TABLE executions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp     TEXT    NOT NULL,   -- ISO-8601
+    command_text  TEXT    NOT NULL,   -- raw user input
+    action        TEXT    NOT NULL,   -- pause/resume/delete/…
+    target        TEXT    NOT NULL,   -- filename or *
+    success       INTEGER NOT NULL,   -- 0 or 1
+    duration_ms   INTEGER NOT NULL,   -- wall-clock milliseconds
+    error_message TEXT                -- NULL on success
+);
+```
+
+### 8-2. API
+
+| Function | Description |
+|---|---|
+| `initDatabase()` | Creates DB and table on first call; returns `Database` instance |
+| `saveExecution(record)` | Inserts one row; called by `dispatcher.ts` after every command |
+| `getRecentHistory(limit=10)` | Returns last N rows ordered by `id DESC` |
+| `getStats()` | Returns total, success count, success rate, most-used action, avg duration |
+
+### 8-3. REPL Commands
+
+```
+Agent > history
+  [✓] [09:15:01] pause first download  (2134ms)
+        action: pause → "first download"
+  [✗] [09:14:52] pause download that does not exist  (621ms)  FAILED: No downloads found
+        action: pause
+
+Agent > stats
+  Total commands   : 12
+  Successful       : 10 (83%)
+  Most used action : pause
+  Avg duration     : 1847ms
+```
+
+### 8-4. Integration Point
+
+`dispatcher.ts` imports `saveExecution` and calls it at the end of every `dispatch()` invocation, recording both successes and failures with their elapsed time.

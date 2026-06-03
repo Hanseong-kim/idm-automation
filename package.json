@@ -2,6 +2,7 @@
   "name": "idm-automation",
   "type": "module",
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.9.0",
     "@wdio/appium-service": "^9.27.1",
     "@wdio/cli": "^9.27.1",
@@ -17,5 +18,7 @@
     "wdio": "wdio run ./wdio.conf.ts",
     "start:agent": "tsx src/main.ts"
   },
-  "dependencies": {}
+  "dependencies": {
+    "better-sqlite3": "^12.10.0"
+  }
 }

@@ -1,10 +1,3 @@
-Create a new file COMBINED_ASSIGNMENT.md in the project root.
-This file merges two assignment documents into one unified goal.
-
-Write the following content exactly:
-
----
-
 # IDM AI-Powered Desktop Automation Assistant
 
 ## Unified Objective
@@ -45,7 +38,7 @@ Delete Download
   - "완료된 것들 다 지워줘"
 - Identify intent, extract parameters
 - Ask follow-up if information is missing
-
+- Smart Target Resolution:** "첫 번째", "마지막", "최신(latest)", "완료된(completed)" 및 "파일명 기반(filename-based)" 매칭 지원
 ### 4. Task Planning
 - Before execution, generate step-by-step plan
 - Show plan to user before running
@@ -63,7 +56,8 @@ Task Plan: "delete ubuntu.iso"
 - Recover from errors automatically
 - Retry failed operations (withRetry wrapper)
 - Supported actions: start, pause, resume, delete, list, clear
-
+- Context Menu Handling:** 우클릭 메뉴 제어 지원 (Open Properties, Copy URL 등)
+- ListView Data Extraction:** 항목 리스트 조회 시 단순히 이름뿐만 아니라 Size, Status, Progress 데이터를 필수적으로 추출
 ### 6. Monitoring & Feedback
 - Real-time step-by-step output:
 [✓] Step 1/3: Download list extracted
@@ -73,6 +67,8 @@ Task Plan: "delete ubuntu.iso"
 - Audit log file saved to logs/
 - Screenshots before/after each action saved to screenshots/
 
+### 7. Non-Functional Requirements
+- Performance: Command processing < 3s, Workflow generation < 10s, UI accuracy > 90%
 ---
 
 ## Technical Stack (MANDATORY)
@@ -87,17 +83,12 @@ Task Plan: "delete ubuntu.iso"
 
 ---
 
-## Evaluation Criteria
-
-| Criteria | Weight |
-|----------|--------|
-| Workflow Discovery (auto-scan UI) | 25% |
-| Natural Language Understanding | 20% |
-| Automation Accuracy | 25% |
-| System Design | 15% |
-| Security & Reliability | 10% |
-| Documentation & Presentation | 5% |
-
+## Evaluation Criteria (Combined)
+| Criteria | Description |
+|----------|-------------|
+| AI Architecture (45%) | Workflow Discovery (25%), NLU & Agent Design (20%) |
+| UI Automation (50%) | Automation Correctness (30%), ListView Handling (20%) |
+| System & Quality (5%) | Code Quality, Docs & Presentation (5%) |
 ---
 
 ## Bonus Features

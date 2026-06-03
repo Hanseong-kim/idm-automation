@@ -2,6 +2,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { DownloadItem } from '../../src/agent/types';
 
+const DEBUG_MODE = process.env['DEBUG_MODE'] === 'true';
+
 // ---------------------------------------------------------------------------
 // Selectors
 // IDM is a Win32 app. WinAppDriver exposes UIA properties via XPath.
@@ -9,40 +11,31 @@ import type { DownloadItem } from '../../src/agent/types';
 // these selectors against your installed IDM version.
 // ---------------------------------------------------------------------------
 const SEL = {
-    // Download list — Win32 SysListView32 → UIA List control
-    // Note: '~name' in WinAppDriver maps to UIA AutomationId, NOT Name/title.
-    // Use XPath @Name for title-based lookup; use browser.getTitle() for the session root window.
     DOWNLOAD_LIST: '//List[@ClassName="SysListView32"]',
+    LIST_ITEM:     './/ListItem',
 
-    // Each download row inside the list (relative XPath — prefixed with .// in usage)
-    LIST_ITEM: './/ListItem',
+    // Toolbar button indices (0-based) within the ToolBar's direct Button children.
+    // WinAppDriver cannot read the Name attribute of IDM toolbar buttons reliably;
+    // index-based access is the only stable approach.
+    TB_START:  1,
+    TB_RESUME: 1,
+    TB_PAUSE:  2,
+    TB_DELETE: 4,
 
-    // Toolbar button indices (0-based) within //ToolBar//Button, confirmed from
-    // screenshot: 추가(0) 시작(1) 중지(2) 모두중지(3) 제거(4) 모두제거(5)
-    //             환경설정(6) 예약작업(7) 전송시작(8) 전송중지(9) 소개하기(10)
-    TB_START:  1,   // 시작 — resume/start selected download
-    TB_PAUSE:  2,   // 중지 — pause/stop selected download
-    TB_DELETE: 4,   // 제거 — delete/remove selected download
-
-    // Context-menu items — retained for Task 5 supplementary operations.
+    // Context-menu items
     CTX_START:  ['~Start', '~Start (Resume)', '~Continue', '~Download'] as const,
     CTX_PAUSE:  ['~Stop', '~Pause', '~Stop (Pause)', '~Pause/Stop']    as const,
     CTX_RESUME: ['~Start', '~Start (Resume)', '~Continue', '~Resume']  as const,
-    CTX_DELETE: ['~Delete', '~Delete...', '~Remove', '~Remove...', '~삭제', '~삭제...', '~제거'] as const,
+    CTX_DELETE: ['~Delete', '~Delete...', '~Remove', '~Remove...']     as const,
 
-    // Task 5 — additional context-menu actions
-    CTX_PROPERTIES:    ['~Properties', '~속성']                                                as const,
-    CTX_COPY_URL:      ['~Copy download link', '~Copy URL', '~링크 복사', '~URL 복사']         as const,
-    CTX_REMOVE:        ['~Remove from list', '~Remove', '~목록에서 제거', '~대기열에서 제거']   as const,
-    CTX_OPEN_LOCATION: ['~Open file location', '~Open folder', '~파일 위치 열기', '~폴더 열기'] as const,
-
+    CTX_PROPERTIES:    ['~Properties']                      as const,
+    CTX_COPY_URL:      ['~Copy download link', '~Copy URL'] as const,
+    CTX_REMOVE:        ['~Remove from list', '~Remove']     as const,
+    CTX_OPEN_LOCATION: ['~Open file location', '~Open folder'] as const,
 } as const;
 
-// Status strings that indicate a completed download (English and Korean)
-const COMPLETED_STATUSES = ['완료', 'complete', 'done', 'finished', '100%'];
-
-// Status strings that indicate a download is already paused/stopped
-const PAUSED_STATUSES = ['paused', 'stopped', 'queued', 'scheduled', '일시정지', '중지', '대기', '일시 정지', '중지됨'];
+const COMPLETED_STATUSES = ['Complete', 'Completed', 'Done', 'Finished', '100%'];
+const PAUSED_STATUSES    = ['Paused', 'Stopped', 'Queued', 'Scheduled'];
 
 // SysListView32 column indices (1-based XPath Text[N]).
 // Verified from WinAppDriver UI tree dump: Text[2] is empty in active downloads;
@@ -73,34 +66,31 @@ export class IdmPage {
 
     /** Wait until the IDM main window is visible and interactive. */
     async waitForReady(timeoutMs = 15_000): Promise<void> {
-        // Step 2: print title + all window handles to help diagnose session scope issues
-        try {
-            const title = await browser.getTitle();
-            console.log(`[Debug] Current window title: "${title}"`);
-
-            // getWindowHandles returns all open window handles for this session
-            const handles = await browser.getWindowHandles();
-            console.log(`[Debug] Window handles (${handles.length}):`, handles);
-
-            // If we are not on the IDM main window, scan handles to find it
-            if (!title.toLowerCase().includes('internet download manager')) {
-                console.log('[Debug] Current window is NOT the IDM main window — scanning handles...');
-                for (const handle of handles) {
-                    try {
-                        await browser.switchToWindow(handle);
-                        const t = await browser.getTitle();
-                        console.log(`[Debug]   Handle ${handle}: "${t}"`);
-                        if (t.toLowerCase().includes('internet download manager')) {
-                            console.log(`[Debug]   Switched to IDM main window via handle ${handle}`);
-                            break;
+        if (DEBUG_MODE) {
+            try {
+                const title = await browser.getTitle();
+                console.log(`[Debug] Current window title: "${title}"`);
+                const handles = await browser.getWindowHandles();
+                console.log(`[Debug] Window handles (${handles.length}):`, handles);
+                if (!title.toLowerCase().includes('internet download manager')) {
+                    console.log('[Debug] Current window is NOT the IDM main window — scanning handles...');
+                    for (const handle of handles) {
+                        try {
+                            await browser.switchToWindow(handle);
+                            const t = await browser.getTitle();
+                            console.log(`[Debug]   Handle ${handle}: "${t}"`);
+                            if (t.toLowerCase().includes('internet download manager')) {
+                                console.log(`[Debug]   Switched to IDM main window via handle ${handle}`);
+                                break;
+                            }
+                        } catch {
+                            // handle not accessible — continue
                         }
-                    } catch {
-                        // handle not accessible — continue
                     }
                 }
+            } catch (diagErr) {
+                console.log('[Debug] waitForReady diagnostic failed:', diagErr instanceof Error ? diagErr.message : diagErr);
             }
-        } catch (diagErr) {
-            console.log('[Debug] waitForReady diagnostic failed:', diagErr instanceof Error ? diagErr.message : diagErr);
         }
 
         await browser.waitUntil(
@@ -128,29 +118,31 @@ export class IdmPage {
     async extractDownloads(): Promise<DownloadItem[]> {
         await this.waitForReady();
 
-        // Step 1: save raw page source for offline inspection
-        try {
-            const xml = await browser.getPageSource();
-            const logsDir = path.join(process.cwd(), 'logs');
-            fs.mkdirSync(logsDir, { recursive: true });
-            fs.writeFileSync(path.join(logsDir, 'pagesource-debug.xml'), xml, 'utf8');
-            console.log(`[Debug] Page source saved to logs/pagesource-debug.xml (${xml.length} chars)`);
-        } catch (e) {
-            console.log('[Debug] Could not save page source:', e instanceof Error ? e.message : e);
+        if (DEBUG_MODE) {
+            try {
+                const xml = await browser.getPageSource();
+                const logsDir = path.join(process.cwd(), 'logs');
+                fs.mkdirSync(logsDir, { recursive: true });
+                fs.writeFileSync(path.join(logsDir, 'pagesource-debug.xml'), xml, 'utf8');
+                console.log(`[Debug] Page source saved to logs/pagesource-debug.xml (${xml.length} chars)`);
+            } catch (e) {
+                console.log('[Debug] Could not save page source:', e instanceof Error ? e.message : e);
+            }
         }
 
         const rows = await this.getListItems();
-        console.log(`[Debug] Found ${rows.length} list items in SysListView32`);
+        if (DEBUG_MODE) console.log(`[Debug] Found ${rows.length} list items in SysListView32`);
 
         const result: DownloadItem[] = [];
 
         for (let i = 0; i < rows.length; i++) {
-            // Step 1: print raw Name attribute before parsing
-            try {
-                const nameAttr = (await rows[i].getAttribute('Name')) ?? '(null)';
-                console.log(`[Debug] Item ${i} raw Name: "${nameAttr}"`);
-            } catch (e) {
-                console.log(`[Debug] Item ${i} could not read Name:`, e instanceof Error ? e.message : e);
+            if (DEBUG_MODE) {
+                try {
+                    const nameAttr = (await rows[i].getAttribute('Name')) ?? '(null)';
+                    console.log(`[Debug] Item ${i} raw Name: "${nameAttr}"`);
+                } catch (e) {
+                    console.log(`[Debug] Item ${i} could not read Name:`, e instanceof Error ? e.message : e);
+                }
             }
             result.push(await this.parseRow(rows[i], i));
         }
@@ -176,13 +168,16 @@ export class IdmPage {
         };
 
         const col0 = await cell(COL_FILENAME);
+        // Text[2] = queue number (skipped), Text[3] = size, Text[4] = status
         if (col0) {
+            const nameAttr     = (await row.getAttribute('Name')) ?? '';
+            const progressMatch = nameAttr.match(/(\d+\.?\d*%)/);
             return {
                 index,
                 fileName: col0,
                 size:     (await cell(COL_SIZE))   || '—',
                 status:   (await cell(COL_STATUS)) || '—',
-                progress: '—',
+                progress: progressMatch ? progressMatch[1] : '—',
             };
         }
 
@@ -196,72 +191,111 @@ export class IdmPage {
 
     async startDownload(item: DownloadItem): Promise<void> {
         const status = await this.getLiveStatus(item.index);
-        if (COMPLETED_STATUSES.some(s => status.includes(s))) {
+        if (COMPLETED_STATUSES.some(s => status.toLowerCase().includes(s.toLowerCase()))) {
             throw new Error(`FAILED: Cannot start "${item.fileName}" — it is already completed.`);
         }
+        const ACTIVE = ['Downloading', 'Connecting', 'Resuming'];
+        if (ACTIVE.some(s => status.toLowerCase().includes(s.toLowerCase()))) {
+            console.log(`[Start] "${item.fileName}" is already active — skipping`);
+            return;
+        }
         await this.clickItem(item.index);
+        await this.ensureSelected(item.index);
+        await browser.pause(1000); // wait for button names to activate after selection
         await this.clickToolbarButton(SEL.TB_START);
-        await this.waitForStatusChange(item.index, [
-            'Downloading', 'Connecting', 'In progress',
-            '다운로드 중', '연결 중',
-        ]);
+        await this.waitForStatusChange(item.index, ['Downloading', 'Connecting', 'Resuming']);
     }
 
     async pauseDownload(item: DownloadItem): Promise<void> {
         const status = await this.getLiveStatus(item.index);
-        if (COMPLETED_STATUSES.some(s => status.includes(s))) {
+        if (COMPLETED_STATUSES.some(s => status.toLowerCase().includes(s.toLowerCase()))) {
             throw new Error(`FAILED: Cannot pause "${item.fileName}" — it is already completed.`);
         }
-        if (PAUSED_STATUSES.some(s => status.includes(s))) {
-            throw new Error(`FAILED: Cannot pause "${item.fileName}" — it is already paused/stopped.`);
+        if (PAUSED_STATUSES.some(s => status.toLowerCase().includes(s.toLowerCase()))) {
+            console.log(`[Pause] "${item.fileName}" is already paused — skipping`);
+            return;
         }
         await this.clickItem(item.index);
+        await this.ensureSelected(item.index);
+        await browser.pause(1000); // wait for button names to activate after selection
         await this.clickToolbarButton(SEL.TB_PAUSE);
-        await this.waitForStatusChange(item.index, [
-            'Paused', 'Stopped', 'Queued',
-            '일시정지', '중지', '대기', '일시 정지', '중지됨',
-        ]);
+        await this.waitForStatusChange(item.index, ['Paused', 'Stopped', 'Queued']);
     }
 
     async resumeDownload(item: DownloadItem): Promise<void> {
         const status = await this.getLiveStatus(item.index);
-        if (COMPLETED_STATUSES.some(s => status.includes(s))) {
+        if (COMPLETED_STATUSES.some(s => status.toLowerCase().includes(s.toLowerCase()))) {
             throw new Error(`FAILED: Cannot resume "${item.fileName}" — it is already completed.`);
         }
+        const ACTIVE = ['Downloading', 'Connecting', 'Resuming'];
+        if (ACTIVE.some(s => status.toLowerCase().includes(s.toLowerCase()))) {
+            console.log(`[Resume] "${item.fileName}" is already active — skipping`);
+            return;
+        }
         await this.clickItem(item.index);
-        await this.clickToolbarButton(SEL.TB_START);
-        await this.waitForStatusChange(item.index, [
-            'Downloading', 'Connecting', 'Resuming',
-            '다운로드 중', '연결 중', '재시작',
-        ]);
+        await this.ensureSelected(item.index);
+        await browser.pause(1000); // wait for button names to activate after selection
+        await this.clickToolbarButton(SEL.TB_RESUME);
+        await this.waitForStatusChange(item.index, ['Downloading', 'Connecting', 'Resuming']);
     }
 
     async deleteDownload(item: DownloadItem): Promise<void> {
         const beforeCount = (await this.getListItems()).length;
 
+        console.log(`[Delete] Selecting "${item.fileName}" at index ${item.index}...`);
         await this.clickItem(item.index);
-        await this.clickToolbarButton(SEL.TB_DELETE);
-        await this.dismissConfirmDialog();
+        await this.ensureSelected(item.index);
+        await browser.pause(1000); // wait for button names to activate after selection
 
-        // Accept either a count drop OR the file name no longer appearing at
-        // the same index (IDM sometimes relocates cancelled items before hiding them).
-        const needle = item.fileName.slice(0, 15).toLowerCase();
+        console.log('[Delete] Clicking Delete toolbar button...');
+        await this.clickToolbarButton(SEL.TB_DELETE);
+
+        // Wait up to 500ms for the confirmation dialog to appear
+        await new Promise<void>(r => setTimeout(r, 500));
+
+        console.log('[Delete] Checking for confirmation dialog...');
+        let dialogHandled = false;
+        for (const btnName of ['Yes', 'OK']) {
+            try {
+                const btn = await $(`//Button[@Name="${btnName}"]`);
+                await btn.waitForExist({ timeout: 3000 });
+                await btn.click();
+                console.log(`[Delete] Dialog dismissed via "${btnName}"`);
+                dialogHandled = true;
+                break;
+            } catch {
+                // button not present — try next candidate
+            }
+        }
+        if (!dialogHandled) {
+            console.log('[Delete] No confirmation dialog appeared — continuing');
+        }
+
+        console.log('[Delete] Waiting for item to be removed from list...');
+        // Scan the entire list for the filename, not just the original index
+        // (IDM may reorder items before removing them)
+        const needle = item.fileName.slice(0, 20).toLowerCase();
         await browser.waitUntil(
             async () => {
-                const items = await this.getListItems();
-                if (items.length < beforeCount) return true;
-                if (items[item.index]) {
-                    const name = ((await items[item.index].getAttribute('Name')) ?? '').toLowerCase();
-                    if (!name.includes(needle)) return true;
+                const current = await this.getListItems();
+                if (current.length < beforeCount) return true;
+                for (const el of current) {
+                    try {
+                        const name = ((await el.getAttribute('Name')) ?? '').toLowerCase();
+                        if (name.includes(needle)) return false; // still present
+                    } catch {
+                        // stale element during redraw — skip
+                    }
                 }
-                return false;
+                return true; // filename no longer found in any row
             },
             {
-                timeout: 15000,
+                timeout: 20000,
                 interval: 500,
-                timeoutMsg: `"${item.fileName}" was not removed from the download list within 15s.`,
+                timeoutMsg: `"${item.fileName}" was not removed from the download list within 20s.`,
             }
         );
+        console.log(`[Delete] "${item.fileName}" successfully removed`);
     }
 
     // -----------------------------------------------------------------------
@@ -287,7 +321,7 @@ export class IdmPage {
 
             for (let i = 0; i < items.length; i++) {
                 const statusText = await this.getItemStatus(items[i]);
-                const isCompleted = COMPLETED_STATUSES.some(s => statusText.includes(s));
+                const isCompleted = COMPLETED_STATUSES.some(s => statusText.toLowerCase().includes(s.toLowerCase()));
 
                 if (isCompleted) {
                     await items[i].click();
@@ -360,43 +394,37 @@ export class IdmPage {
             }
         };
 
-        // Strategy 1: standard SysListView32 (original)
         let items = await toArray('//List[@ClassName="SysListView32"]//ListItem');
         if (items.length > 0) {
-            console.log(`[Debug] Strategy 1 (SysListView32//ListItem): ${items.length} items`);
+            if (DEBUG_MODE) console.log(`[Debug] Strategy 1 (SysListView32//ListItem): ${items.length} items`);
             return items;
         }
 
-        // Strategy 2: IDM uses AutomationId="1002" for the main download list on some versions
         items = await toArray('//List[@AutomationId="1002"]//ListItem');
         if (items.length > 0) {
-            console.log(`[Debug] Strategy 2 (AutomationId=1002//ListItem): ${items.length} items`);
+            if (DEBUG_MODE) console.log(`[Debug] Strategy 2 (AutomationId=1002//ListItem): ${items.length} items`);
             return items;
         }
 
-        // Strategy 3: any List's ListItems (broader search)
         items = await toArray('//List//ListItem');
         if (items.length > 0) {
-            console.log(`[Debug] Strategy 3 (//List//ListItem): ${items.length} items`);
+            if (DEBUG_MODE) console.log(`[Debug] Strategy 3 (//List//ListItem): ${items.length} items`);
             return items;
         }
 
-        // Strategy 4: global ListItem search
         items = await toArray('//ListItem');
         if (items.length > 0) {
-            console.log(`[Debug] Strategy 4 (//ListItem): ${items.length} items`);
+            if (DEBUG_MODE) console.log(`[Debug] Strategy 4 (//ListItem): ${items.length} items`);
             return items;
         }
 
-        // Strategy 5: DataItem — some WinAppDriver versions expose SysListView32
-        // rows as DataItem instead of ListItem (depends on UIA provider version)
         items = await toArray('//DataItem');
         if (items.length > 0) {
-            console.log(`[Debug] Strategy 5 (//DataItem): ${items.length} items`);
+            if (DEBUG_MODE) console.log(`[Debug] Strategy 5 (//DataItem): ${items.length} items`);
             return items;
         }
 
-        console.log('[Debug] All 5 selector strategies returned 0 items');
+        if (DEBUG_MODE) console.log('[Debug] All 5 selector strategies returned 0 items');
         return [];
     }
 
@@ -431,25 +459,50 @@ export class IdmPage {
         });
     }
 
-    /**
-     * Click a toolbar button by its 0-based index within the toolbar's direct
-     * interactive children (Button and SplitButton).
-     * Using a union XPath ensures SplitButton elements are included in the
-     * array, keeping buttons[index] aligned with the visual toolbar order.
-     * Indices confirmed from UI tree dump:
-     *   1=시작, 2=중지, 4=제거
-     */
+    // Task 4: verify selection state before toolbar click; re-click if not selected
+    private async ensureSelected(index: number): Promise<void> {
+        try {
+            const items = await this.getListItems();
+            const item = items[index];
+            if (!item) return;
+            const isSelected = await item.getAttribute('IsSelected');
+            if (isSelected === 'True') return; // already selected
+            // Re-click and give UIA time to reflect selection
+            await item.click();
+            await new Promise<void>(r => setTimeout(r, 300));
+        } catch {
+            // Non-fatal — proceed even if selection check fails
+        }
+    }
+
     private async clickToolbarButton(index: number): Promise<void> {
-        await this.withRetry(async () => {
-            const buttons = await $$('//ToolBar/*[self::Button or self::SplitButton]');
-            const btn = buttons[index];
-            if (!btn) {
-                throw new Error(
-                    `Toolbar button at index ${index} not found — only ${buttons.length} button(s) in toolbar.`
-                );
+        const toArr = (raw: unknown): WebdriverIO.Element[] => {
+            const arr = raw as WebdriverIO.Element[];
+            const result: WebdriverIO.Element[] = [];
+            for (let i = 0; i < arr.length; i++) result.push(arr[i]);
+            return result;
+        };
+
+        // Primary: buttons directly under the identified ToolBar element
+        try {
+            const toolbar = await $('//ToolBar[@AutomationId="59392"]');
+            const btns = toArr(await toolbar.$$('.//Button') as unknown);
+            if (btns.length > index) {
+                await btns[index].click();
+                return;
             }
-            await btn.click();
-        });
+        } catch {
+            // fall through to global fallback
+        }
+
+        // Fallback: all toolbar buttons globally
+        const allBtns = toArr(await $$('//ToolBar//Button') as unknown);
+        if (!allBtns[index]) {
+            throw new Error(
+                `Toolbar button index ${index} not found. Total: ${allBtns.length}`
+            );
+        }
+        await allBtns[index].click();
     }
 
     /**
@@ -548,7 +601,7 @@ export class IdmPage {
 
     /** Dismiss a confirmation dialog if one appears; silently no-op if absent. */
     private async dismissConfirmDialog(): Promise<void> {
-        const candidates = ['예', '확인', 'Yes', 'OK'];
+        const candidates = ['Yes', 'OK'];
         for (const name of candidates) {
             try {
                 const btn = await $(`//Button[@Name="${name}"]`);

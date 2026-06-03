@@ -20,6 +20,7 @@
         "allowImportingTsExtensions": true,
         "resolveJsonModule": true,
         "isolatedModules": true,
+        "allowSyntheticDefaultImports": true,
         "strict": true,
         "noUnusedLocals": true,
         "noUnusedParameters": true,

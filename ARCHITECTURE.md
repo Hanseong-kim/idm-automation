@@ -166,8 +166,14 @@ CommandResult { success: true, message: '"ubuntu.iso" paused successfully.' }
 | Dispatcher | `src/agent/dispatcher.ts` | Command routing + monitoring integration |
 | Target Resolver | `src/agent/targetResolver.ts` | Fuzzy-match target name/index/status |
 | UI Page Object | `test/pageobjects/IdmPage.ts` | WinAppDriver selector + retry logic |
-| Workflow Discovery | `src/discovery/workflowDiscovery.ts` | IDM UI map + workflow diagrams |
+| Workflow Discovery | `src/discovery/workflowDiscovery.ts` | Static IDM UI map + workflow diagrams |
+| Live App Scanner | `src/discovery/appScanner.ts` | getPageSource() XML parse + live workflow gen |
 | Execution Monitor | `src/monitoring/executionMonitor.ts` | Step logging + audit trail |
+| Credential Manager | `src/security/credentialManager.ts` | AES-256 key storage, PIN guard |
+| Execution History | `src/database/executionHistory.ts` | SQLite history + stats |
+| App Plugin Interface | `src/plugins/AppPlugin.ts` | Multi-app extensibility contract |
+| IDM Plugin | `src/plugins/IdmPlugin.ts` | IDM implementation of AppPlugin |
+| Plugin Registry | `src/plugins/PluginRegistry.ts` | Register / lookup plugins by name |
 
 ---
 
@@ -175,13 +181,105 @@ CommandResult { success: true, message: '"ubuntu.iso" paused successfully.' }
 
 | Layer | Technology |
 |-------|-----------|
-| Language | TypeScript 5.8 (strict, ESNext) |
+| Language | TypeScript 5.8 (strict, ESNext, allowSyntheticDefaultImports) |
 | Test Runner | WebdriverIO v9 + Mocha |
 | Desktop Bridge | Appium 2.x + appium-windows-driver v5.4.0 |
 | UI Driver | WinAppDriver (Windows Accessibility API) |
 | LLM / NLP | Google Gemini 2.5 Flash (REST API) |
 | Runtime | Node.js via `tsx` (no build step) |
+| Database | SQLite via `better-sqlite3` (native, synchronous) |
 | Target App | Internet Download Manager (Win32) |
+
+---
+
+## Plugin Architecture
+
+The system is designed to automate any desktop application, not just IDM. The plugin interface decouples app-specific code from the agent core.
+
+```
+┌──────────────────────────────────────────────────┐
+│  Agent Core (main.ts, dispatcher.ts, nlParser.ts) │
+└──────────────────────┬───────────────────────────┘
+                       │ uses
+                       ▼
+┌──────────────────────────────────────────────────┐
+│  AppPlugin Interface  (src/plugins/AppPlugin.ts)  │
+│  + name, processName, capabilities               │
+│  + actions.list()  actions.execute(cmd, target)  │
+└──────────────────────┬───────────────────────────┘
+          ┌────────────┴────────────┐
+          ▼                         ▼
+┌──────────────────┐      ┌────────────────────────┐
+│  IdmPlugin       │      │  FuturePlugin          │
+│  (IDMan.exe)     │      │  (Notepad, Chrome, …)  │
+│  wraps IdmPage   │      │  new implementation    │
+└──────────────────┘      └────────────────────────┘
+          │
+          ▼
+┌──────────────────────────────────────────────────┐
+│  PluginRegistry  (src/plugins/PluginRegistry.ts) │
+│  Map<name → AppPlugin>                           │
+│  registerPlugin() / getPlugin() / listPlugins()  │
+└──────────────────────────────────────────────────┘
+```
+
+Adding a new target app requires only:
+1. Create `src/plugins/MyAppPlugin.ts` implementing `AppPlugin`
+2. Call `registerPlugin(new MyAppPlugin())` in `main.ts`
+
+---
+
+## Data Layer
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Execution History  (src/database/executionHistory.ts)  │
+│                                                         │
+│  data/history.db  (SQLite, created on first run)        │
+│                                                         │
+│  Table: executions                                      │
+│    id           INTEGER  PK AUTOINCREMENT               │
+│    timestamp    TEXT     ISO-8601                       │
+│    command_text TEXT     raw user input                 │
+│    action       TEXT     pause/resume/delete/…          │
+│    target       TEXT     filename or *                  │
+│    success      INTEGER  0 or 1                         │
+│    duration_ms  INTEGER  wall-clock ms                  │
+│    error_message TEXT    nullable                       │
+│                                                         │
+│  API:                                                   │
+│    saveExecution(record)  — called by dispatcher.ts     │
+│    getRecentHistory(n)    — "history" REPL command      │
+│    getStats()             — "stats" REPL command        │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Security Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  Session PIN Guard  (main.ts: checkSessionPin())         │
+│  AGENT_PIN env var = SHA-256 hash of the PIN             │
+│  Max 3 attempts → process.exit(1) on failure             │
+│  Skipped when AGENT_PIN is not set (dev/CI mode)         │
+└──────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────┐
+│  Credential Manager  (src/security/credentialManager.ts) │
+│                                                          │
+│  Priority: env var → encrypted file → TTY prompt         │
+│                                                          │
+│  Storage: %APPDATA%\idm-agent\credentials.enc            │
+│  Cipher:  AES-256-CBC                                    │
+│  Key:     SHA-256(hostname + ":" + username + ":v1")     │
+│  IV:      16 random bytes per write (stored with data)   │
+│  Format:  <iv-hex>:<ciphertext-hex>                      │
+│                                                          │
+│  Raw key values are NEVER logged or printed.             │
+└──────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -193,6 +291,10 @@ Ensures the agent works offline or when the API key is absent.
 **UiFunctions interface** — Dispatcher is decoupled from IdmPage via an
 interface, enabling easy unit testing with mock implementations.
 
+**AppPlugin interface** — Any desktop app can be targeted by implementing
+three fields (`name`, `processName`, `capabilities`) and two async methods
+(`list`, `execute`). The registry maps names to implementations at runtime.
+
 **withRetry() in IdmPage** — WinAppDriver occasionally returns transient
 failures. A retry wrapper at the UI layer isolates this from business logic.
 
@@ -200,8 +302,10 @@ failures. A retry wrapper at the UI layer isolates this from business logic.
 text (stripped tildes, ellipses, lowercased) rather than exact AutomationId,
 handling IDM's localised/versioned menu labels.
 
-**Optional monitor parameter** — `dispatch(cmd, ui, monitor?)` keeps the
-existing test suite passing while enabling rich step logging in the REPL.
+**Optional monitor + rawText in dispatch()** — `dispatch(cmd, ui, monitor?, rawText?)` is
+backward-compatible: existing tests call it with 2 args; the REPL passes all 4
+to enable rich logging and DB recording simultaneously.
 
-**Non-fatal screenshot/log failures** — Capture errors are swallowed so
-a missing `screenshots/` dir or disk-full condition never aborts automation.
+**Non-fatal DB/screenshot/log failures** — All persistence side-effects are
+wrapped in try/catch so disk-full, missing dirs, or native-module failures
+never abort automation of the primary target.
