@@ -19,6 +19,7 @@
     "start:agent": "tsx src/main.ts"
   },
   "dependencies": {
-    "better-sqlite3": "^12.10.0"
+    "better-sqlite3": "^12.10.0",
+    "clipboardy": "^5.3.1"
   }
 }

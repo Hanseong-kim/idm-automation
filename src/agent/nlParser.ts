@@ -10,11 +10,11 @@ type IndexResolver = { pattern: RegExp; resolve: (m: RegExpMatchArray) => number
 // Order matters: 'resume' before 'start' to avoid capturing "start (resume)"
 const ACTION_PATTERNS: ActionPattern[] = [
     { pattern: /\b(clear|clean\s*up|remove\s*completed|delete\s*completed)\b/i, action: 'clear'  },
-    { pattern: /\b(resume|continue|unpause)\b/i,                                action: 'resume' },
-    { pattern: /\b(start|begin|download again)\b/i,                             action: 'start'  },
-    { pattern: /\b(pause|suspend|halt|stop)\b/i,                                action: 'pause'  },
-    { pattern: /\b(delete|remove|cancel)\b/i,                                   action: 'delete' },
-    { pattern: /\b(list|show|display|get all|what are|what|view)\b/i,           action: 'list'   },
+    { pattern: /\b(resume|continue|unpause)\b/i,                                  action: 'resume' },
+    { pattern: /\b(start|begin|download|add|new|download\s*again)\b/i,           action: 'start'  }, 
+    { pattern: /\b(pause|suspend|halt|stop)\b/i,                                  action: 'pause'  },
+    { pattern: /\b(delete|remove|cancel)\b/i,                                     action: 'delete' },
+    { pattern: /\b(list|show|display|get\s*all|what|view)\b/i,                    action: 'list'   },
 ];
 
 const INDEX_RESOLVERS: IndexResolver[] = [
@@ -54,7 +54,12 @@ export function parseNaturalLanguage(input: string): IdmCommand {
         }
     }
 
-    const target = extractTarget(input);
+    const urlMatch = input.match(/(https?:\/\/[^\s]+)/i);
+    const safeUrl = urlMatch ? urlMatch[0] : null;
+
+    // URL이 존재하면 원본 URL을 그대로 쓰고, 없으면 텍스트를 정제(extractTarget)합니다.
+    const target = safeUrl ? safeUrl : extractTarget(input);
+    
     return { action, target, index };
 }
 

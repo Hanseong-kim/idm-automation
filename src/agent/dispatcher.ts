@@ -73,11 +73,14 @@ export async function dispatch(
             return resultRef;
         }
 
-        const isUrl = target && /^https?:\/\//i.test(target);
-        if (action === 'start' && isUrl) {
-            monitor?.step(2, 3, `Adding new download from URL: ${target}`, true);
-            await ui.addUrlDownload(target);
-            const msg = `URL download started successfully: ${target}`;
+        const urlMatch = target.match(/https?:\/\/[^\s]+/i);
+        const finalUrl = urlMatch ? urlMatch[0] : null;
+
+        // 이제 URL이 발견되면, 무조건 URL 다운로드 액션을 실행합니다.
+        if (action === 'start' && finalUrl) {
+            monitor?.step(2, 3, `Adding new download from URL: ${finalUrl}`, true);
+            await ui.addUrlDownload(finalUrl); // 깨끗하게 추출된 URL을 넘깁니다.
+            const msg = `URL download started successfully: ${finalUrl}`;
             monitor?.step(3, 3, msg, true);
             console.log(`[IDM Agent] ${msg}`);
             resultRef = { success: true, message: msg };

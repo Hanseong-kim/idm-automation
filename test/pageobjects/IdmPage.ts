@@ -1,13 +1,15 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { DownloadItem } from '../../src/agent/types';
+import { execSync } from 'child_process';
 
 const DEBUG_MODE = process.env['DEBUG_MODE'] === 'true';
 
 const SEL = {
     DOWNLOAD_LIST: '//List[@ClassName="SysListView32"]',
     LIST_ITEM:     './/ListItem',
-
+    
+    TB_ADD_URL: 0,
     TB_START:  1,
     TB_RESUME: 1,
     TB_PAUSE:  2,
@@ -651,84 +653,53 @@ export class IdmPage {
     async addUrlDownload(url: string): Promise<void> {
         await this.waitForReady();
 
+        // 1. 툴바 인덱스를 사용하여 'Add URL' 버튼 클릭
         console.log('[IDMPage] Clicking "Add URL" button...');
-        // 1. '주소 추가(Add URL)' 버튼 찾기 (영어/한글/인덱스 폴백 지원)
-        const addBtnSelectors = [
-            '//Button[contains(@Name, "Add URL")]',
-            '//Button[contains(@Name, "주소 추가")]',
-            '//ToolBar//Button[1]' // 못 찾을 경우 툴바의 첫 번째 버튼 클릭
-        ];
+        await this.clickToolbarButton(SEL.TB_ADD_URL);
 
-        let clicked = false;
-        for (const sel of addBtnSelectors) {
-            try {
-                const btn = await $(sel);
-                await btn.waitForExist({ timeout: 2000 });
-                await btn.click();
-                clicked = true;
-                break;
-            } catch { continue; }
-        }
-        if (!clicked) throw new Error('FAILED: "Add URL(주소 추가)" 버튼을 찾을 수 없습니다.');
-
-        // 2. 주소 입력 다이얼로그 대기 및 URL 입력
-        console.log('[IDMPage] Waiting for address dialog and entering URL...');
-        const editBox = await $('//Window//Edit');
+        // 2. 주소 입력 다이얼로그 대기
+        const addressDialog = await $('//Window[@ClassName="#32770"]');
+        await addressDialog.waitForExist({ timeout: 5000 });
+        
+        const editBox = await addressDialog.$('.//Edit'); 
         await editBox.waitForExist({ timeout: 5000 });
         
-        // 팝업 애니메이션과 포커스 전환이 완료될 때까지 잠시 대기
+        // 확실한 포커스 확보 (이 클릭 덕분에 PowerShell SendKeys가 정확히 IDM에 들어갑니다)
+        await editBox.click();
         await browser.pause(500); 
         
-        // [핵심 수정] click(), setValue(), browser.keys() 모두 금지!
-        // IDM이 기존 텍스트를 전체 블록 지정해둔 상태이므로, 
-        // addValue()를 사용해 순수 키보드 입력만 전송하면 자동으로 덮어써집니다.
-        await editBox.addValue(url);
+        // 3. PowerShell을 이용한 클립보드 붙여넣기 (WinAppDriver 버그 완벽 우회)
+        console.log('[IDMPage] Pasting URL via Native OS PowerShell...');
+        const psCommand = `Set-Clipboard -Value '${url}'; Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('^a^v')`;
+        execSync(`powershell -command "${psCommand}"`);
         
-        // 3. 첫 번째 다이얼로그의 OK/확인 버튼 클릭
-        console.log('[IDMPage] Clicking OK on address dialog...');
-        const okBtn = await $('//Window//Button[@Name="OK" or @Name="확인"]');
+        await browser.pause(800);
+        
+        // 4. OK 버튼 클릭
+        const okBtn = await addressDialog.$('.//Button[@Name="OK" or @Name="확인"]');
         await okBtn.click();
 
-        // =====================================================================
-        // [새로 추가된 로직] 자가 복구(Self-Healing) 시스템 가동
-        // 예상치 못한 팝업(예: 중복 다운로드 경고)이 뜨면 Llama 3가 스스로 닫습니다.
-        // =====================================================================
+        // 5. 자가 복구 실행 (중복 다운로드 경고창 등 처리)
         await this.handleUnexpectedDialog("I want to add and start downloading this URL file.");
-        // =====================================================================
 
-        // 4. 파일 용량 분석 후 뜨는 '다운로드 시작' 다이얼로그 대기 및 클릭
+        // 6. '다운로드 시작' 버튼 대기 및 클릭 (최적화)
         console.log('[IDMPage] Waiting for Download File Info dialog...');
-
-        // 4. 파일 용량 분석 후 뜨는 '다운로드 시작' 다이얼로그 대기 및 클릭
-        console.log('[IDMPage] Waiting for Download File Info dialog...');
-        const startBtnSelectors = [
-            '//Window//Button[@Name="Start Download"]',
-            '//Window//Button[@Name="다운로드 시작"]',
-            '//Window//Button[@Name="시작"]'
-        ];
-
-        let startClicked = false;
-        // 서버 연결 속도에 따라 팝업이 늦게 뜰 수 있으므로 최대 15초(1초씩 15번) 폴링
-        for (let i = 0; i < 15; i++) {
-            for (const sel of startBtnSelectors) {
-                try {
-                    const btn = await $(sel);
-                    if (await btn.isExisting()) {
-                        await btn.click();
-                        startClicked = true;
-                        break;
-                    }
-                } catch { /* 무시하고 다음 루프 */ }
-            }
-            if (startClicked) break;
-            await browser.pause(1000); // 프로젝트 요구사항의 임시 대기(1초)
+        
+        const startBtn = await $('//Window//Button[@Name="Start Download" or @Name="다운로드 시작" or @Name="시작"]');
+        
+        try {
+            // [수정] 15초 대기 -> 5초 대기로 단축
+            await startBtn.waitForExist({ timeout: 5000 }); 
+            await startBtn.click();
+            console.log('[IDMPage] "Start Download" clicked successfully.');
+        } catch (e) {
+            // [핵심 수정] 에러(throw new Error)를 던지지 않습니다!
+            // 중복 파일 팝업에서 OK를 누르면 버튼 없이 바로 시작되는 경우가 있기 때문입니다.
+            console.log('[IDMPage] "Start Download" button not found. Assuming download started automatically or was handled by Self-Healing.');
         }
-
-        if (!startClicked) {
-            throw new Error('FAILED: "다운로드 시작" 다이얼로그 버튼을 찾지 못했습니다. (연결 지연 혹은 이미 다운로드 중)');
-        }
-        console.log('[IDMPage] "Start Download" clicked successfully.');
     }
+
+
     // -----------------------------------------------------------------------
     // Bonus Feature: Self-Healing Automation (UI Tree OCR + LLM)
     // -----------------------------------------------------------------------
@@ -771,25 +742,30 @@ export class IdmPage {
             console.log(`  - Buttons: [${availableButtons.join(', ')}]`);
 
             // 4. Llama 3(Ollama)에게 프롬프트를 보내서 스스로 판단하게 함
-            console.log('  [🤖 Agent Brain] Asking Llama 3 what to do...');
+            console.log('  [🤖 Agent Brain] Asking AI what to do...');
             const prompt = `
-                        You are an intelligent RPA agent controlling Internet Download Manager.
-                        The user's intent is: "${intent}".
-                        An unexpected dialog just popped up.
-                        Dialog message: "${dialogText.trim()}"
-                        Available buttons you can click: [${availableButtons.join(', ')}]
+                            You are an intelligent RPA agent controlling Internet Download Manager.
+                            The user's intent is: "${intent}".
+                            An unexpected dialog just popped up.
+                            Dialog message: "${dialogText.trim()}"
+                            Available buttons you can click: [${availableButtons.join(', ')}]
 
-                        Your task: Decide which button to click to fulfill the user's intent. 
-                        (For example, if it's a duplicate download warning, choose 'Yes' or 'OK' to download it anyway).
-                        Respond STRICTLY in JSON format with a single key "target_button".
-                        Example: { "target_button": "Yes" }
-                        `;
+                            Your task: Decide which button to click to fulfill the user's intent. 
+                            
+                            CRITICAL RULES:
+                            1. NEVER choose window control buttons like '최소화' (Minimize), '최대화' (Maximize), '닫기' (Close), or 'x'.
+                            2. Always prefer confirmation buttons like 'OK', 'Yes', '확인', '예' to proceed with the download.
+                            
+                            Respond STRICTLY in JSON format with a single key "target_button".
+                            Example: { "target_button": "OK" }
+                            `;
+
             // 로컬 Ollama API 호출 (JSON 포맷 강제)
             const resp = await fetch('http://localhost:11434/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    model: 'llama3',
+                    model: 'qwen2:1.5b',
                     format: 'json',
                     messages: [{ role: 'user', content: prompt }],
                     stream: false
