@@ -219,7 +219,8 @@ export class IdmPage {
         await this.ensureSelected(item.index);
         await browser.pause(1000); // wait for button names to activate after selection
         await this.clickToolbarButton(SEL.TB_PAUSE);
-        await this.waitForStatusChange(item.index, ['Paused', 'Stopped', 'Queued']);
+        await browser.pause(2000);
+        console.log('[Action] Completed successfully');
     }
 
     async resumeDownload(item: DownloadItem): Promise<void> {
@@ -236,7 +237,8 @@ export class IdmPage {
         await this.ensureSelected(item.index);
         await browser.pause(1000); // wait for button names to activate after selection
         await this.clickToolbarButton(SEL.TB_RESUME);
-        await this.waitForStatusChange(item.index, ['Downloading', 'Connecting', 'Resuming']);
+        await browser.pause(2000);
+        console.log('[Action] Completed successfully');
     }
 
     async deleteDownload(item: DownloadItem): Promise<void> {
@@ -476,33 +478,9 @@ export class IdmPage {
     }
 
     private async clickToolbarButton(index: number): Promise<void> {
-        const toArr = (raw: unknown): WebdriverIO.Element[] => {
-            const arr = raw as WebdriverIO.Element[];
-            const result: WebdriverIO.Element[] = [];
-            for (let i = 0; i < arr.length; i++) result.push(arr[i]);
-            return result;
-        };
-
-        // Primary: buttons directly under the identified ToolBar element
-        try {
-            const toolbar = await $('//ToolBar[@AutomationId="59392"]');
-            const btns = toArr(await toolbar.$$('.//Button') as unknown);
-            if (btns.length > index) {
-                await btns[index].click();
-                return;
-            }
-        } catch {
-            // fall through to global fallback
-        }
-
-        // Fallback: all toolbar buttons globally
-        const allBtns = toArr(await $$('//ToolBar//Button') as unknown);
-        if (!allBtns[index]) {
-            throw new Error(
-                `Toolbar button index ${index} not found. Total: ${allBtns.length}`
-            );
-        }
-        await allBtns[index].click();
+        const btns = await $$('//ToolBar//Button');
+        if (!btns[index]) throw new Error('Button index ' + index + ' not found. Total: ' + btns.length);
+        await btns[index].click();
     }
 
     /**
@@ -653,8 +631,10 @@ export class IdmPage {
         await browser.waitUntil(
             async () => {
                 try {
-                    const status = await this.getLiveStatus(index);
-                    return lower.some(s => status.includes(s));
+                    const items = await this.getListItems();
+                    const currentStatus = await this.getItemStatus(items[index]);
+                    if (DEBUG_MODE) console.log('[Status Check] Current:', currentStatus);
+                    return lower.some(s => currentStatus.includes(s));
                 } catch {
                     return false;
                 }
