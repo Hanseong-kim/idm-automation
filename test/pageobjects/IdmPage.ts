@@ -4,19 +4,10 @@ import type { DownloadItem } from '../../src/agent/types';
 
 const DEBUG_MODE = process.env['DEBUG_MODE'] === 'true';
 
-// ---------------------------------------------------------------------------
-// Selectors
-// IDM is a Win32 app. WinAppDriver exposes UIA properties via XPath.
-// Use Windows Inspect.exe (SDK tool) or Accessibility Insights to verify/tune
-// these selectors against your installed IDM version.
-// ---------------------------------------------------------------------------
 const SEL = {
     DOWNLOAD_LIST: '//List[@ClassName="SysListView32"]',
     LIST_ITEM:     './/ListItem',
 
-    // Toolbar button indices (0-based) within the ToolBar's direct Button children.
-    // WinAppDriver cannot read the Name attribute of IDM toolbar buttons reliably;
-    // index-based access is the only stable approach.
     TB_START:  1,
     TB_RESUME: 1,
     TB_PAUSE:  2,
@@ -256,23 +247,9 @@ export class IdmPage {
         await new Promise<void>(r => setTimeout(r, 500));
 
         console.log('[Delete] Checking for confirmation dialog...');
-        let dialogHandled = false;
-        for (const btnName of ['Yes', 'OK']) {
-            try {
-                const btn = await $(`//Button[@Name="${btnName}"]`);
-                await btn.waitForExist({ timeout: 3000 });
-                await btn.click();
-                console.log(`[Delete] Dialog dismissed via "${btnName}"`);
-                dialogHandled = true;
-                break;
-            } catch {
-                // button not present — try next candidate
-            }
-        }
-        if (!dialogHandled) {
-            console.log('[Delete] No confirmation dialog appeared — continuing');
-        }
 
+        await this.dismissConfirmDialog();
+        
         console.log('[Delete] Waiting for item to be removed from list...');
         // Scan the entire list for the filename, not just the original index
         // (IDM may reorder items before removing them)
@@ -320,6 +297,7 @@ export class IdmPage {
         while (found) {
             found = false;
             const items = await this.getListItems();
+            const countBefore = items.length;
 
             for (let i = 0; i < items.length; i++) {
                 const statusText = await this.getItemStatus(items[i]);
@@ -327,11 +305,25 @@ export class IdmPage {
 
                 if (isCompleted) {
                     await items[i].click();
-                    await this.clickToolbarButton(SEL.TB_DELETE);  // index 3
+                    await this.clickToolbarButton(SEL.TB_DELETE);
+                    
+                    // 1. 팝업이 뜰 시간을 보장 (500ms 대기)
+                    await new Promise<void>(r => setTimeout(r, 500));
                     await this.dismissConfirmDialog();
+                    
+                    // 2. 실제로 항목이 리스트에서 제거될 때까지 최대 10초간 동기화 대기
+                    await browser.waitUntil(
+                        async () => (await this.getListItems()).length < countBefore,
+                        { 
+                            timeout: 10000, 
+                            interval: 500,
+                            timeoutMsg: 'Item was not removed from the list in time.'
+                        }
+                    );
+                    
                     cleared++;
                     found = true;
-                    break; // restart scan — indices have shifted
+                    break; // 인덱스 변화가 생기므로 루프 재시작
                 }
             }
         }
@@ -579,18 +571,27 @@ export class IdmPage {
 
     /** Dismiss a confirmation dialog if one appears; silently no-op if absent. */
     private async dismissConfirmDialog(): Promise<void> {
+        // 1. 팝업창(#32770) 자체가 화면에 존재하는지 먼저 1초만 빠르고 짧게 확인합니다.
+        const dialog = await $('//Window[@ClassName="#32770"]');
+        try {
+            await dialog.waitForExist({ timeout: 1000 });
+        } catch {
+            // 팝업창이 안 떴다면 허공에 대고 6초씩 버튼을 찾을 필요가 없습니다! 즉시 종료.
+            return; 
+        }
+
+        // 2. 팝업이 확실히 있다면, 그 안에서 Yes, OK, 예, 확인 중 하나를 눌러 닫습니다.
         const candidates = ['Yes', 'OK'];
         for (const name of candidates) {
             try {
-                const btn = await $(`//Button[@Name="${name}"]`);
-                await btn.waitForExist({ timeout: 3000 });
-                await btn.click();
-                return;
-            } catch {
-                // dialog didn't appear or button not found — continue
-            }
+                const btn = await dialog.$(`.//Button[@Name="${name}"]`);
+                if (await btn.isExisting()) {
+                    await btn.click();
+                    await browser.pause(500); // 닫히는 애니메이션 대기
+                    return;
+                }
+            } catch { /* 다음 버튼 시도 */ }
         }
-        // silently continue if no dialog appeared
     }
 
     /** Fetch the live status string for the row at `index` (lowercase). */
@@ -646,6 +647,176 @@ export class IdmPage {
                     `Status did not change to [${expectedStatuses.join(' | ')}] within 10 s.`,
             }
         );
+    }
+    async addUrlDownload(url: string): Promise<void> {
+        await this.waitForReady();
+
+        console.log('[IDMPage] Clicking "Add URL" button...');
+        // 1. '주소 추가(Add URL)' 버튼 찾기 (영어/한글/인덱스 폴백 지원)
+        const addBtnSelectors = [
+            '//Button[contains(@Name, "Add URL")]',
+            '//Button[contains(@Name, "주소 추가")]',
+            '//ToolBar//Button[1]' // 못 찾을 경우 툴바의 첫 번째 버튼 클릭
+        ];
+
+        let clicked = false;
+        for (const sel of addBtnSelectors) {
+            try {
+                const btn = await $(sel);
+                await btn.waitForExist({ timeout: 2000 });
+                await btn.click();
+                clicked = true;
+                break;
+            } catch { continue; }
+        }
+        if (!clicked) throw new Error('FAILED: "Add URL(주소 추가)" 버튼을 찾을 수 없습니다.');
+
+        // 2. 주소 입력 다이얼로그 대기 및 URL 입력
+        console.log('[IDMPage] Waiting for address dialog and entering URL...');
+        const editBox = await $('//Window//Edit');
+        await editBox.waitForExist({ timeout: 5000 });
+        
+        // 팝업 애니메이션과 포커스 전환이 완료될 때까지 잠시 대기
+        await browser.pause(500); 
+        
+        // [핵심 수정] click(), setValue(), browser.keys() 모두 금지!
+        // IDM이 기존 텍스트를 전체 블록 지정해둔 상태이므로, 
+        // addValue()를 사용해 순수 키보드 입력만 전송하면 자동으로 덮어써집니다.
+        await editBox.addValue(url);
+        
+        // 3. 첫 번째 다이얼로그의 OK/확인 버튼 클릭
+        console.log('[IDMPage] Clicking OK on address dialog...');
+        const okBtn = await $('//Window//Button[@Name="OK" or @Name="확인"]');
+        await okBtn.click();
+
+        // =====================================================================
+        // [새로 추가된 로직] 자가 복구(Self-Healing) 시스템 가동
+        // 예상치 못한 팝업(예: 중복 다운로드 경고)이 뜨면 Llama 3가 스스로 닫습니다.
+        // =====================================================================
+        await this.handleUnexpectedDialog("I want to add and start downloading this URL file.");
+        // =====================================================================
+
+        // 4. 파일 용량 분석 후 뜨는 '다운로드 시작' 다이얼로그 대기 및 클릭
+        console.log('[IDMPage] Waiting for Download File Info dialog...');
+
+        // 4. 파일 용량 분석 후 뜨는 '다운로드 시작' 다이얼로그 대기 및 클릭
+        console.log('[IDMPage] Waiting for Download File Info dialog...');
+        const startBtnSelectors = [
+            '//Window//Button[@Name="Start Download"]',
+            '//Window//Button[@Name="다운로드 시작"]',
+            '//Window//Button[@Name="시작"]'
+        ];
+
+        let startClicked = false;
+        // 서버 연결 속도에 따라 팝업이 늦게 뜰 수 있으므로 최대 15초(1초씩 15번) 폴링
+        for (let i = 0; i < 15; i++) {
+            for (const sel of startBtnSelectors) {
+                try {
+                    const btn = await $(sel);
+                    if (await btn.isExisting()) {
+                        await btn.click();
+                        startClicked = true;
+                        break;
+                    }
+                } catch { /* 무시하고 다음 루프 */ }
+            }
+            if (startClicked) break;
+            await browser.pause(1000); // 프로젝트 요구사항의 임시 대기(1초)
+        }
+
+        if (!startClicked) {
+            throw new Error('FAILED: "다운로드 시작" 다이얼로그 버튼을 찾지 못했습니다. (연결 지연 혹은 이미 다운로드 중)');
+        }
+        console.log('[IDMPage] "Start Download" clicked successfully.');
+    }
+    // -----------------------------------------------------------------------
+    // Bonus Feature: Self-Healing Automation (UI Tree OCR + LLM)
+    // -----------------------------------------------------------------------
+    async handleUnexpectedDialog(intent: string): Promise<boolean> {
+        console.log('[Self-Healing] Scanning for unexpected dialogs...');
+        try {
+            // 1. 현재 떠 있는 최상단 팝업(Window) 찾기 (메인 창 제외)
+            const activeWindow = await $('//Window[@ClassName="#32770"]');
+            
+            // 15초(15번) 정도 짧게 기다리며 팝업이 뜰 시간을 줍니다
+            let isDialogExists = false;
+            for(let i=0; i<3; i++) {
+                if(await activeWindow.isExisting()) { isDialogExists = true; break; }
+                await browser.pause(500);
+            }
+            if (!isDialogExists) return false; // 아무 창도 안 떴으면 종료
+
+            // 2. 팝업창 내의 모든 텍스트(Text) 긁어오기
+            const textElements = await activeWindow.$$('.//Text');
+            let dialogText = '';
+            for (const el of textElements) {
+                const text = await el.getText().catch(() => '');
+                if (text) dialogText += text + ' ';
+            }
+
+            // 3. 팝업창 내의 누를 수 있는 모든 버튼(Button) 이름 긁어오기
+            const buttonElements = await activeWindow.$$('.//Button');
+            const availableButtons: string[] = [];
+            for (const el of buttonElements) {
+                const name = await el.getAttribute('Name').catch(() => '');
+                if (name && name.trim() !== '') availableButtons.push(name);
+            }
+
+            if (!dialogText.trim() || availableButtons.length === 0) {
+                return false; // 읽을 텍스트나 버튼이 없으면 포기
+            }
+
+            console.log(`\n  [🤖 UI Scanner] Detected Dialog!`);
+            console.log(`  - Message: "${dialogText.trim()}"`);
+            console.log(`  - Buttons: [${availableButtons.join(', ')}]`);
+
+            // 4. Llama 3(Ollama)에게 프롬프트를 보내서 스스로 판단하게 함
+            console.log('  [🤖 Agent Brain] Asking Llama 3 what to do...');
+            const prompt = `
+                        You are an intelligent RPA agent controlling Internet Download Manager.
+                        The user's intent is: "${intent}".
+                        An unexpected dialog just popped up.
+                        Dialog message: "${dialogText.trim()}"
+                        Available buttons you can click: [${availableButtons.join(', ')}]
+
+                        Your task: Decide which button to click to fulfill the user's intent. 
+                        (For example, if it's a duplicate download warning, choose 'Yes' or 'OK' to download it anyway).
+                        Respond STRICTLY in JSON format with a single key "target_button".
+                        Example: { "target_button": "Yes" }
+                        `;
+            // 로컬 Ollama API 호출 (JSON 포맷 강제)
+            const resp = await fetch('http://localhost:11434/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: 'llama3',
+                    format: 'json',
+                    messages: [{ role: 'user', content: prompt }],
+                    stream: false
+                })
+            });
+
+            const data = await resp.json();
+            const decision = JSON.parse(data.message?.content || '{}');
+            const targetButton = decision.target_button;
+
+            // 5. LLM이 선택한 버튼 클릭 실행!
+            if (targetButton && availableButtons.includes(targetButton)) {
+                console.log(`  [✨ Self-Healing] Llama 3 decided to click: "${targetButton}"`);
+                const btnToClick = await activeWindow.$(`.//Button[@Name="${targetButton}"]`);
+                await btnToClick.click();
+                await browser.pause(1000); // 클릭 후 애니메이션 대기
+                return true;
+            } else {
+                console.log(`  [❌ Self-Healing] Llama 3 failed to decide or picked invalid button: ${targetButton}`);
+                return false;
+            }
+
+        } catch (err) {
+            // 에러가 나도 프로그램이 죽지 않도록 조용히 무시 (Self-healing의 기본)
+            console.warn('  [Self-Healing Warning] Could not process dialog:', err instanceof Error ? err.message : err);
+            return false;
+        }
     }
 }
 

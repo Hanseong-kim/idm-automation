@@ -10,6 +10,7 @@ export interface UiFunctions {
     resumeDownload(item: DownloadItem): Promise<void>;
     deleteDownload(item: DownloadItem): Promise<void>;
     clearCompleted(): Promise<number>;
+    addUrlDownload(url: string): Promise<void>;
 }
 
 export async function dispatch(
@@ -65,6 +66,18 @@ export async function dispatch(
             const msg = count > 0
                 ? `Cleared ${count} completed download(s).`
                 : 'No completed downloads to clear.';
+            monitor?.step(3, 3, msg, true);
+            console.log(`[IDM Agent] ${msg}`);
+            resultRef = { success: true, message: msg };
+            record();
+            return resultRef;
+        }
+
+        const isUrl = target && /^https?:\/\//i.test(target);
+        if (action === 'start' && isUrl) {
+            monitor?.step(2, 3, `Adding new download from URL: ${target}`, true);
+            await ui.addUrlDownload(target);
+            const msg = `URL download started successfully: ${target}`;
             monitor?.step(3, 3, msg, true);
             console.log(`[IDM Agent] ${msg}`);
             resultRef = { success: true, message: msg };

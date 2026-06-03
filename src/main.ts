@@ -171,6 +171,7 @@ async function main() {
         resumeDownload:   (item) => page.resumeDownload(item),
         deleteDownload:   (item) => page.deleteDownload(item),
         clearCompleted:   ()     => page.clearCompleted(),
+        addUrlDownload:   (url)  => page.addUrlDownload(url),
     };
 
     const commandHistory: IdmCommand[] = [];
@@ -206,6 +207,10 @@ async function main() {
     // Execute one parsed command with plan display + monitoring
     // -----------------------------------------------------------------------
     async function executeCommand(command: IdmCommand, rawText: string): Promise<void> {
+        
+        console.log('\n================================================================================');
+        console.log(`[🚀 New Command] User Input: "${rawText}"`);
+        console.log('================================================================================');
         console.log(
             `[AI Intent] Action: ${command.action}, Target: ${command.target}` +
             (command.index !== undefined ? `, Index: ${command.index}` : '')
@@ -228,6 +233,8 @@ async function main() {
 
         const icon = result.success ? '✓' : '✗';
         console.log(`[Result] ${icon} ${result.message}`);
+
+        console.log('================================================================================\n');
 
         if (result.success) {
             commandHistory.push({ ...command });

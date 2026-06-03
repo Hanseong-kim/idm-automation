@@ -25,6 +25,7 @@ export class ExecutionMonitor {
         const icon = ok ? '✓' : '✗';
         const msg = error ? `${description} — ${error}` : description;
         const status = ok ? 'SUCCESS' : 'FAILURE';
+        console.log(`  ------------------------------------------------------------`);    
         console.log(`  [${icon}] Step ${n}/${total}: ${msg}`);
         this.append(`[${ts()}] [${status}] Step ${n}/${total}: ${msg}\n`);
     }
