@@ -172,6 +172,41 @@ export async function parseWithLLM(text: string): Promise<IdmCommand | null> {
     return isValidIdmCommand(parsed) ? parsed : null;
 }
 
+export async function parseWithOllama(text: string): Promise<IdmCommand | null> {
+    try {
+        const body = {
+            model: 'llama3',
+            format: 'json', // Ollama에게 JSON 형태로만 응답하도록 강제
+            messages: [
+                { role: 'system', content: SYSTEM_PROMPT },
+                { role: 'user', content: text }
+            ],
+            stream: false // 한 번에 응답을 받기 위해 stream을 끕니다
+        };
+
+        const resp = await fetch('http://localhost:11434/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+
+        if (!resp.ok) {
+            throw new Error(`Ollama API error ${resp.status}`);
+        }
+
+        const data = await resp.json();
+        const rawText = data.message?.content;
+        if (!rawText) return null;
+
+        const parsed = JSON.parse(rawText);
+        return isValidIdmCommand(parsed) ? parsed : null;
+    } catch (err) {
+        console.error('[Ollama Error]', err);
+        return null;
+    }
+}
+
+
 // ---------------------------------------------------------------------------
 // Main entry point: LLM first, regex fallback
 // ---------------------------------------------------------------------------
@@ -181,33 +216,39 @@ export async function parseWithLLM(text: string): Promise<IdmCommand | null> {
 const KNOWN_ACTION_RE =
     /\b(start|begin|pause|stop|suspend|halt|resume|continue|unpause|delete|remove|cancel|list|show|display|view|clear)\b/i;
 
+// ---------------------------------------------------------------------------
+// Main entry point: 환경 변수에 따라 모델 스위칭 (LLM first, regex fallback)
+// ---------------------------------------------------------------------------
 export async function parseCommand(text: string): Promise<IdmCommand> {
     if (!text.trim()) {
         throw new Error('Empty command. Try: "pause ubuntu.iso" or "list all downloads".');
     }
 
     try {
-        const llmResult = await Promise.race([
-            parseWithLLM(text),
-            new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000)),
-        ]);
+        const aiProvider = process.env['AI_PROVIDER'] || 'gemini';
+        let llmResult = null;
 
-        if (llmResult) {
-            // Sanity check: if the input contains no recognisable action keyword,
-            // the LLM is likely hallucinating (e.g. "abcxyz" → {action:"list"}).
-            // Reject the result and let the regex parser throw a clear error.
-            if (!KNOWN_ACTION_RE.test(text)) {
-                // fall through to regex parser
-            } else {
-                return llmResult;
-            }
-        }
-
-        if (!process.env['LLM_API_KEY']) {
-            // Silent: no key configured, expected fallback
+        if (aiProvider === 'ollama') {
+            // Ollama 로컬 모델 사용 (로컬 모델은 첫 구동 시 약간 느릴 수 있어 타임아웃을 15초로 넉넉히 줍니다)
+            console.log('[Agent] Routing request to local Ollama (Llama 3)...');
+            llmResult = await Promise.race([
+                parseWithOllama(text),
+                new Promise((resolve) => setTimeout(() => resolve(null), 15000)),
+            ]) as IdmCommand | null;
         } else {
-            console.warn('[Agent Warning] LLM parsing failed or timed out. Falling back to Regex parser.');
+            // 기존 Gemini API 사용
+            console.log('[Agent] Routing request to Gemini...');
+            llmResult = await Promise.race([
+                parseWithLLM(text),
+                new Promise((resolve) => setTimeout(() => resolve(null), 8000)),
+            ]) as IdmCommand | null;
         }
+
+        if (llmResult) return llmResult;
+
+        // LLM이 실패하거나 타임아웃 났을 때 Fallback 로직
+        console.warn(`[Agent Warning] ${aiProvider} parsing failed or timed out. Falling back to Regex parser.`);
+
     } catch (err) {
         console.warn('[Agent Warning] LLM parsing failed. Falling back to Regex parser.', err instanceof Error ? err.message : err);
     }
