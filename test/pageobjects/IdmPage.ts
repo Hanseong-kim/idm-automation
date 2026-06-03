@@ -653,48 +653,55 @@ export class IdmPage {
     async addUrlDownload(url: string): Promise<void> {
         await this.waitForReady();
 
-        // 1. 툴바 인덱스를 사용하여 'Add URL' 버튼 클릭
+        // 1. Click 'Add URL' toolbar button
         console.log('[IDMPage] Clicking "Add URL" button...');
         await this.clickToolbarButton(SEL.TB_ADD_URL);
 
-        // 2. 주소 입력 다이얼로그 대기
+        // 2. Wait for URL input dialog to be fully visible (not just present in DOM)
         const addressDialog = await $('//Window[@ClassName="#32770"]');
-        await addressDialog.waitForExist({ timeout: 5000 });
-        
-        const editBox = await addressDialog.$('.//Edit'); 
-        await editBox.waitForExist({ timeout: 5000 });
-        
-        // 확실한 포커스 확보 (이 클릭 덕분에 PowerShell SendKeys가 정확히 IDM에 들어갑니다)
+        await addressDialog.waitForDisplayed({ timeout: 5000 });
+
+        const editBox = await addressDialog.$('.//Edit');
+        await editBox.waitForDisplayed({ timeout: 5000 });
+
         await editBox.click();
-        await browser.pause(500); 
-        
-        // 3. PowerShell을 이용한 클립보드 붙여넣기 (WinAppDriver 버그 완벽 우회)
+        await browser.pause(500);
+
+        // 3. Paste URL via PowerShell clipboard (bypasses WinAppDriver text-input bug)
         console.log('[IDMPage] Pasting URL via Native OS PowerShell...');
         const psCommand = `Set-Clipboard -Value '${url}'; Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('^a^v')`;
         execSync(`powershell -command "${psCommand}"`);
-        
+
         await browser.pause(800);
-        
-        // 4. OK 버튼 클릭
+
+        // 4. Click OK, then wait for the URL input dialog to CLOSE before proceeding
         const okBtn = await addressDialog.$('.//Button[@Name="OK" or @Name="확인"]');
         await okBtn.click();
+        await addressDialog.waitForExist({ timeout: 5000, reverse: true });
 
-        // 5. 자가 복구 실행 (중복 다운로드 경고창 등 처리)
+        // 5. Handle any intermediate warning dialogs (e.g., duplicate URL warnings)
         await this.handleUnexpectedDialog("I want to add and start downloading this URL file.");
 
-        // 6. '다운로드 시작' 버튼 대기 및 클릭 (최적화)
-        console.log('[IDMPage] Waiting for Download File Info dialog...');
-        
-        const startBtn = await $('//Window//Button[@Name="Start Download" or @Name="다운로드 시작" or @Name="시작"]');
-        
+        // 6. Wait for the File Info dialog, then click 'Start Download' scoped to it (not global screen)
+        console.log('[IDMPage] Looking for Download File Info dialog...');
         try {
-            // [수정] 15초 대기 -> 5초 대기로 단축
-            await startBtn.waitForExist({ timeout: 5000 }); 
+            await browser.waitUntil(
+                async () => {
+                    try {
+                        const d = await $('//Window[@ClassName="#32770"]');
+                        return await d.isDisplayed();
+                    } catch {
+                        return false;
+                    }
+                },
+                { timeout: 5000, interval: 500, timeoutMsg: '' }
+            );
+            const fileInfoDialog = await $('//Window[@ClassName="#32770"]');
+            const startBtn = await fileInfoDialog.$('.//Button[@Name="Start Download" or @Name="다운로드 시작" or @Name="시작"]');
+            await startBtn.waitForDisplayed({ timeout: 3000 });
             await startBtn.click();
             console.log('[IDMPage] "Start Download" clicked successfully.');
-        } catch (e) {
-            // [핵심 수정] 에러(throw new Error)를 던지지 않습니다!
-            // 중복 파일 팝업에서 OK를 누르면 버튼 없이 바로 시작되는 경우가 있기 때문입니다.
+        } catch {
             console.log('[IDMPage] "Start Download" button not found. Assuming download started automatically or was handled by Self-Healing.');
         }
     }
@@ -725,12 +732,16 @@ export class IdmPage {
                 if (text) dialogText += text + ' ';
             }
 
-            // 3. 팝업창 내의 누를 수 있는 모든 버튼(Button) 이름 긁어오기
+            // 3. 팝업창 내의 버튼 이름 수집 (시스템 창 제어 버튼 제외)
+            const BLOCKED_BUTTONS = ['최대화', '최소화', '닫기', 'x', 'Maximize', 'Minimize', 'Close', 'Restore', 'Help'];
             const buttonElements = await activeWindow.$$('.//Button');
             const availableButtons: string[] = [];
             for (const el of buttonElements) {
                 const name = await el.getAttribute('Name').catch(() => '');
-                if (name && name.trim() !== '') availableButtons.push(name);
+                if (name && name.trim() !== '') {
+                    const isBlocked = BLOCKED_BUTTONS.some(b => name.toLowerCase().trim() === b.toLowerCase());
+                    if (!isBlocked) availableButtons.push(name);
+                }
             }
 
             if (!dialogText.trim() || availableButtons.length === 0) {
@@ -741,7 +752,7 @@ export class IdmPage {
             console.log(`  - Message: "${dialogText.trim()}"`);
             console.log(`  - Buttons: [${availableButtons.join(', ')}]`);
 
-            // 4. Llama 3(Ollama)에게 프롬프트를 보내서 스스로 판단하게 함
+            // 4. AI에게 프롬프트를 보내서 스스로 판단하게 함
             console.log('  [🤖 Agent Brain] Asking AI what to do...');
             const prompt = `
                             You are an intelligent RPA agent controlling Internet Download Manager.
@@ -778,13 +789,13 @@ export class IdmPage {
 
             // 5. LLM이 선택한 버튼 클릭 실행!
             if (targetButton && availableButtons.includes(targetButton)) {
-                console.log(`  [✨ Self-Healing] Llama 3 decided to click: "${targetButton}"`);
+                console.log(`  [✨ Self-Healing] AI decided to click: "${targetButton}"`);
                 const btnToClick = await activeWindow.$(`.//Button[@Name="${targetButton}"]`);
                 await btnToClick.click();
                 await browser.pause(1000); // 클릭 후 애니메이션 대기
                 return true;
             } else {
-                console.log(`  [❌ Self-Healing] Llama 3 failed to decide or picked invalid button: ${targetButton}`);
+                console.log(`  [❌ Self-Healing] AI failed to decide or picked invalid button: ${targetButton}`);
                 return false;
             }
 

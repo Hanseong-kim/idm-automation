@@ -11,7 +11,7 @@ type IndexResolver = { pattern: RegExp; resolve: (m: RegExpMatchArray) => number
 const ACTION_PATTERNS: ActionPattern[] = [
     { pattern: /\b(clear|clean\s*up|remove\s*completed|delete\s*completed)\b/i, action: 'clear'  },
     { pattern: /\b(resume|continue|unpause)\b/i,                                  action: 'resume' },
-    { pattern: /\b(start|begin|download|add|new|download\s*again)\b/i,           action: 'start'  }, 
+    { pattern: /\b(start|begin|download|add|new|download\s*again|fetch|grab|get(?!\s+all))\b/i, action: 'start'  },
     { pattern: /\b(pause|suspend|halt|stop)\b/i,                                  action: 'pause'  },
     { pattern: /\b(delete|remove|cancel)\b/i,                                     action: 'delete' },
     { pattern: /\b(list|show|display|get\s*all|what|view)\b/i,                    action: 'list'   },
@@ -235,7 +235,7 @@ export async function parseCommand(text: string): Promise<IdmCommand> {
 
         if (aiProvider === 'ollama') {
             // Ollama 로컬 모델 사용 (로컬 모델은 첫 구동 시 약간 느릴 수 있어 타임아웃을 15초로 넉넉히 줍니다)
-            console.log('[Agent] Routing request to local Ollama (Llama 3)...');
+            console.log('[Agent] Routing request to AI model...');
             llmResult = await Promise.race([
                 parseWithOllama(text),
                 new Promise((resolve) => setTimeout(() => resolve(null), 15000)),
