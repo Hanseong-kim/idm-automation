@@ -1,4 +1,5 @@
-export type ActionType = 'start' | 'pause' | 'resume' | 'delete' | 'list' | 'clear';
+// types.ts
+export type ActionType = 'add' | 'start' | 'pause' | 'resume' | 'delete' | 'list' | 'clear';
 
 export interface IdmCommand {
     action: ActionType;

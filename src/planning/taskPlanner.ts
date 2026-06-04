@@ -1,4 +1,4 @@
-import type { IdmCommand } from '../agent/types';
+import type { IdmCommand, ActionType } from '../agent/types';
 
 export interface PlanStep {
     n: number;
@@ -12,9 +12,14 @@ export interface ExecutionPlan {
     estimatedSeconds: number;
 }
 
-type ActionType = 'start' | 'pause' | 'resume' | 'delete' | 'list' | 'clear';
-
 const TEMPLATES: Record<ActionType, (t: string) => string[]> = {
+    add: (t) => [
+        'Open Add URL dialog (toolbar btn 0)',
+        `Paste download URL: ${t}`,
+        'Confirm URL input (OK/확인)',
+        'Wait for File Info dialog',
+        'Click "Start Download" to begin (scan dialog buttons)',
+    ],
     pause: (t) => [
         `Locate download "${t}" in IDM list`,
         'Select the download item',
@@ -57,7 +62,7 @@ const TEMPLATES: Record<ActionType, (t: string) => string[]> = {
 };
 
 const ETA: Record<ActionType, number> = {
-    list: 1, pause: 3, resume: 3, start: 3, delete: 5, clear: 8,
+    add: 5, list: 1, pause: 3, resume: 3, start: 3, delete: 5, clear: 8,
 };
 
 function resolveLabel(cmd: IdmCommand): string {

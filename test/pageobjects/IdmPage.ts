@@ -46,11 +46,15 @@ const COMPLETED_STATUSES = ['Complete', 'Completed', 'Done', 'Finished', '100%']
 const PAUSED_STATUSES    = ['Paused', 'Stopped', 'Queued', 'Scheduled'];
 
 // SysListView32 column indices (1-based XPath Text[N]).
-// Verified from WinAppDriver UI tree dump: Text[2] is empty in active downloads;
-// Text[3] = file size; Text[4] = status string (e.g. "Downloading", "Paused").
+// 실측 확정 (IDM 6.42): Text[1]=파일명, Text[2]=(빈칸), Text[3]=파일크기,
+//   Text[4]=진행률(%) — 상태어("Downloading"/"Paused")가 아닌 퍼센트,
+//   Text[5]=남은시간, Text[6]=전송속도 (멈추면 빈 문자열).
+// pause/resume 판정은 Text[4] 문자열이 아니라 Text[6] 전송속도 유무로 한다.
 const COL_FILENAME = 1;
 const COL_SIZE     = 3;
-const COL_STATUS   = 4;
+const COL_STATUS   = 4;   // 진행률(%) — getLiveStatus의 "100%" completed 판정에만 유효
+// COL_TIMELEFT = 5        // 남은 시간 (현재 미사용, 참고용)
+const COL_SPEED    = 6;   // 전송 속도 — pause/resume 판정의 핵심
 
 // ---------------------------------------------------------------------------
 // Helper: parse a ListView item's UIA Name attribute into structured columns.
@@ -211,7 +215,7 @@ export class IdmPage {
         await this.ensureSelected(item.index);
         await browser.pause(1000); // wait for button names to activate after selection
         await this.clickToolbarButton(SEL.TB_START);
-        await this.waitForStatusChange(item.index, ['Downloading', 'Connecting', 'Resuming']);
+        await this.waitForTransferState(item.index, true);
     }
 
     async pauseDownload(item: DownloadItem): Promise<void> {
@@ -227,8 +231,8 @@ export class IdmPage {
         await this.ensureSelected(item.index);
         await browser.pause(1000); // wait for button names to activate after selection
         await this.clickToolbarButton(SEL.TB_PAUSE);
-        await browser.pause(2000);
-        console.log('[Action] Completed successfully');
+        await this.waitForTransferState(item.index, false);
+        
     }
 
     async resumeDownload(item: DownloadItem): Promise<void> {
@@ -245,8 +249,8 @@ export class IdmPage {
         await this.ensureSelected(item.index);
         await browser.pause(1000); // wait for button names to activate after selection
         await this.clickToolbarButton(SEL.TB_RESUME);
-        await browser.pause(2000);
-        console.log('[Action] Completed successfully');
+        await this.waitForTransferState(item.index, true);
+        
     }
 
     async deleteDownload(item: DownloadItem): Promise<void> {
@@ -620,11 +624,9 @@ export class IdmPage {
     }
 
     /**
-     * Resolve the status text for a list-view row element.
-     * Uses COL_STATUS (Text[4]) which holds the status string in IDM's
-     * SysListView32 layout (Text[2] is empty; Text[3] is file size).
-     * Falls back to the Name attribute tab-split on WinAppDriver versions
-     * that expose a composite Name rather than individual Text children.
+     * Resolve the progress/status text for a list-view row element (Text[COL_STATUS]).
+     * IDM 6.42 실측: Text[4]는 진행률(%)만 표시 — "100%"로 completed 판정에 사용.
+     * pause/resume 상태 판정은 isTransferring(Text[COL_SPEED])으로 별도 수행.
      */
     private async getItemStatus(item: WebdriverIO.Element): Promise<string> {
         try {
@@ -637,35 +639,40 @@ export class IdmPage {
     }
 
     /**
-     * Poll the status of the row at `index` until it matches one of
-     * `expectedStatuses` (case-insensitive).
-     *
-     * Each poll calls getLiveStatus(index) which re-fetches the full item list
-     * and reads Text[COL_STATUS] — this avoids stale element references and
-     * the incorrect-column bug that existed when polling the Name attribute.
+     * 행이 현재 활성 전송 중인지(전송 속도 > 0) 판정.
+     * IDM 6.42 실측: Text[COL_SPEED](Text[6])에 "36.53 MB/sec" 형태로 표시,
+     * 멈추면 빈 문자열 또는 "0 B/sec".
      */
-    private async waitForStatusChange(index: number, expectedStatuses: string[]): Promise<void> {
-        const lower = expectedStatuses.map(s => s.toLowerCase());
+    private async isTransferring(index: number): Promise<boolean> {
+        const items = await this.getListItems();
+        const item = items[index];
+        if (!item) return false;
+        const speed = (await (await item.$(`.//Text[${COL_SPEED}]`)).getText().catch(() => '')) ?? '';
+        const s = speed.trim().toLowerCase();
+        if (!s) return false;
+        const num = parseFloat(s.replace(/[^0-9.]/g, ''));
+        return num > 0;
+    }
+
+    /** 전송 속도가 기대 상태(활성/비활성)가 될 때까지 폴링. */
+    private async waitForTransferState(index: number, expectActive: boolean, timeoutMs = 10000): Promise<void> {
         await browser.waitUntil(
             async () => {
                 try {
-                    const items = await this.getListItems();
-                    const currentStatus = await this.getItemStatus(items[index]);
-                    if (DEBUG_MODE) console.log('[Status Check] Current:', currentStatus);
-                    return lower.some(s => currentStatus.includes(s));
+                    return (await this.isTransferring(index)) === expectActive;
                 } catch {
                     return false;
                 }
             },
             {
-                timeout: 10000,
+                timeout: timeoutMs,
                 interval: 500,
-                timeoutMsg:
-                    `Status did not change to [${expectedStatuses.join(' | ')}] within 10 s.`,
+                timeoutMsg: `Transfer did not become ${expectActive ? 'active' : 'inactive'} within ${timeoutMs / 1000}s.`,
             }
         );
     }
-    async addUrlDownload(url: string): Promise<void> {
+
+    async addUrlDownload(url: string): Promise<{ wasDuplicate: boolean }> {
         await this.waitForReady();
         const { execSync } = await import('child_process');
 
@@ -714,38 +721,54 @@ export class IdmPage {
         await okBtn.click();
         console.log('[addUrlDownload] OK clicked.');
 
-        // 7. Wait for URL input dialog to close (probe: Edit field gone)
+        // 7. OK 클릭 이후: 중복 경고 팝업 처리 + URL 다이얼로그 닫힘 대기 (최대 8초)
         console.log('[addUrlDownload] Waiting for URL dialog to close...');
-        await browser.waitUntil(
-            async () => {
-                try { return !(await $(IDM_DIALOG.URL_EDIT).isExisting()); }
-                catch { return true; }
-            },
-            { timeout: 5000, interval: 200, timeoutMsg: 'URL dialog did not close.' }
-        );
+
+        let urlDialogClosed = false;
+        let wasDuplicate = false;
+        const dlDeadline = Date.now() + 8_000;
+
+        while (!urlDialogClosed && Date.now() < dlDeadline) {
+            // 1. 중복 팝업 처리 — 아직 처리 안 됐을 때만 시도
+            if (!wasDuplicate) {
+                wasDuplicate = await this.handleDuplicateDialog();
+            }
+
+            // 2. URL 입력창 닫힘 확인 (Edit 필드 사라짐)
+            try {
+                if (!(await $(IDM_DIALOG.URL_EDIT).isExisting())) { urlDialogClosed = true; break; }
+            } catch {
+                urlDialogClosed = true; break;
+            }
+
+            await new Promise<void>(r => setTimeout(r, 300));
+        }
+
+        if (!urlDialogClosed) {
+            // self-healing 폴백: LLM이 팝업 처리 시도
+            console.warn('[addUrlDownload] URL dialog still open after 8s — attempting self-healing...');
+            const healed = await this.handleUnexpectedDialog('add and start the download');
+            if (!healed) {
+                throw new Error('[addUrlDownload] URL dialog did not close (and no known dialog handled).');
+            }
+        }
         console.log('[addUrlDownload] URL dialog closed.');
 
-        // [진단] File Info 창 ClassName / 버튼 트리 확인용 — 동작 확인 후 이 블록 제거 예정
-        {
-            await browser.pause(1200); // File Info 창이 뜰 시간 (서버에서 파일정보 받아옴)
-            const handles = await browser.getWindowHandles();
-            console.log('[FileInfo][Diag] handles:', handles.length, JSON.stringify(handles));
-            let xml = '';
-            try { xml = await browser.getPageSource(); }
-            catch (e) { console.log('[FileInfo][Diag] getPageSource FAILED:', e instanceof Error ? e.message : e); }
-            console.log('[FileInfo][Diag] pagesource len:', xml.length);
-            console.log('[FileInfo][Diag] has "Start Download":', xml.includes('Start Download'));
-            console.log('[FileInfo][Diag] has "Download File Info":', xml.includes('Download File Info'));
-            console.log('[FileInfo][Diag] has "#32770":', xml.includes('#32770'));
-            const classes = [...new Set([...xml.matchAll(/ClassName="([^"]*)"/g)].map(m => m[1]))];
-            console.log('[FileInfo][Diag] ClassNames:', JSON.stringify(classes));
-            try { fs.writeFileSync(path.join(process.cwd(), 'logs', 'fileinfo-tree.xml'), xml, 'utf8'); } catch {}
+        // 8. 중복이면 Start Download 단계 건너뜀 — "Download complete" 창 등은 무시
+        if (wasDuplicate) {
+            console.log('[addUrlDownload] Duplicate handled — skipping Start Download step.');
+            return { wasDuplicate: true };
         }
 
         // 8. File Info ClassName 무관하게 트리 전체에서 "Start Download" 버튼을 찾아 클릭
         console.log('[addUrlDownload] Waiting for "Start Download" button...');
-        await this.waitAndClickStartDownload();
-        console.log('[addUrlDownload] "Start Download" clicked successfully.');
+        try {
+            await this.waitAndClickStartDownload();
+            console.log('[addUrlDownload] "Start Download" clicked successfully.');
+        } catch (e) {
+            console.warn('[addUrlDownload] "Start Download" not clicked:', e instanceof Error ? e.message : e);
+        }
+        return { wasDuplicate: false };
     }
 
 
@@ -757,6 +780,51 @@ export class IdmPage {
      * - 현재 컨텍스트 스캔 → 실패 시 다른 window handle 전환 후 재스캔
      * - STRICT 복합 키워드만 사용 (bare "start"/"시작" 금지: 툴바 오매칭 방지)
      */
+
+    /**
+     * 중복 다운로드 경고("Duplicate download link") 팝업이 떠 있으면 OK를 눌러
+     * IDM 기본 동작(기존 설정대로 진행)으로 처리한다. 처리했으면 true.
+     *
+     * 단수 $()는 첫 번째 #32770(메인 창)을 잡아 SysListView 검사 후 null을 반환하므로
+     * 두 번째로 뜬 중복 팝업에 도달하지 못한다 — $$()로 전수 검사한다.
+     */
+    private async handleDuplicateDialog(): Promise<boolean> {
+        const wins = await $$('//Window[@ClassName="#32770"]') as unknown as WebdriverIO.Element[];
+        for (let i = 0; i < wins.length; i++) {
+            const win = wins[i];
+            const winName = ((await win.getAttribute('Name').catch(() => '')) ?? '').toLowerCase();
+
+            // 1차: 제목으로 식별
+            let isDup = winName.includes('duplicate');
+
+            // 2차: 제목 매칭 실패 시 본문 텍스트로 식별
+            if (!isDup) {
+                const texts = await win.$$('.//Text') as unknown as WebdriverIO.Element[];
+                for (let t = 0; t < texts.length; t++) {
+                    const tx = ((await texts[t].getText().catch(() => '')) ?? '').toLowerCase();
+                    if (tx.includes('already exists') || tx.includes('duplicate') || tx.includes('이미')) {
+                        isDup = true;
+                        break;
+                    }
+                }
+            }
+            if (!isDup) continue;
+
+            // 중복 팝업 확정 — OK 클릭 (Name="OK" 확정, 정규화 부분일치로 안전하게)
+            const btns = await win.$$('.//Button') as unknown as WebdriverIO.Element[];
+            for (let b = 0; b < btns.length; b++) {
+                const bn = ((await btns[b].getAttribute('Name').catch(() => '')) ?? '').trim().toLowerCase();
+                if (['cancel', '취소', '최소화', '최대화', '닫기', 'x'].includes(bn)) continue;
+                if (bn === 'ok' || bn === '확인') {
+                    console.log('[addUrlDownload] Duplicate dialog detected → clicking OK to proceed.');
+                    await btns[b].click();
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private async waitAndClickStartDownload(): Promise<void> {
         const START_KEYWORDS = ['startdownload', '다운로드시작', '지금다운로드', 'downloadnow'];
         const AVOID_KEYWORDS = ['later', '나중', 'cancel', '취소'];
@@ -857,6 +925,9 @@ export class IdmPage {
         console.log('[Self-Healing] Scanning for unexpected dialogs...');
         try {
             // 1. #32770 다이얼로그 확인 — SysListView32를 포함하면 메인 창이므로 제외
+            //    한계: $()는 첫 번째 #32770만 잡는다. 메인 창(SysListView 포함)이 첫 번째이면
+            //    null을 반환해 그 뒤에 뜬 팝업을 놓친다. 중복 다운로드 팝업처럼 두 번째 #32770이
+            //    진짜 대화상자인 경우는 handleDuplicateDialog($$로 전수 검사)로 먼저 처리한다.
             const findValidDialog = async (): Promise<WebdriverIO.Element | null> => {
                 try {
                     const win = $('//Window[@ClassName="#32770"]');

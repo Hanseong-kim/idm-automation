@@ -1,3 +1,4 @@
+//appScanner.ts - Perform a live scan of the IDM application UI to discover elements and generate workflows.
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -32,14 +33,27 @@ export interface ScanResult {
     timestamp: string;
     windowTitle: string;
     elements: {
-        buttons: UIElement[];
+        buttons: UIElement[];        // XML-parsed, all buttons (includes scrollbars/window controls)
         lists: UIElement[];
         toolbars: UIElement[];
         menuItems: UIElement[];
+        toolbarButtons: UIElement[]; // live-queried, index-ordered toolbar buttons only
     };
     stats: ScanStats;
     workflows: GeneratedWorkflow[];
 }
+
+// ---------------------------------------------------------------------------
+// Toolbar index map — single source of truth.
+// Matches REPORT.md §2-2 and IdmPage SEL constants:
+//   TB_ADD_URL=0, TB_START=1, TB_PAUSE=2, TB_DELETE=4
+// ---------------------------------------------------------------------------
+const TOOLBAR_ROLE_MAP = [
+    { index: 0, role: 'Add URL',      action: 'add'    },
+    { index: 1, role: 'Resume/Start', action: 'start'  },
+    { index: 2, role: 'Stop/Pause',   action: 'pause'  },
+    { index: 4, role: 'Delete',       action: 'delete' },
+] as const;
 
 // 30-second cache to avoid repeated full scans within a single session
 let cache: { result: ScanResult; expiresAt: number } | null = null;
@@ -73,63 +87,84 @@ function extractByType(xml: string, controlType: string): UIElement[] {
     return result;
 }
 
+/**
+ * Live-query toolbar buttons via WinAppDriver element API.
+ * Union XPath includes both Button and SplitButton so index matches
+ * REPORT.md §2-2 (e.g. Delete is SplitButton at index 4).
+ * Document order = left-to-right screen order = correct 0-based index.
+ * WDIO v9 $$ is not a plain array — manually copy into UIElement[].
+ */
+async function getToolbarButtons(): Promise<UIElement[]> {
+    const raw = await $$('//ToolBar/*[self::Button or self::SplitButton]') as unknown as WebdriverIO.Element[];
+    const arr: UIElement[] = [];
+    for (let i = 0; i < raw.length; i++) {
+        const el = raw[i];
+        const name    = (await el.getAttribute('Name').catch(() => '')) ?? '';
+        const enabled = (await el.getAttribute('IsEnabled').catch(() => 'true')) !== 'false';
+        arr.push({
+            name,
+            automationId: '',
+            className:    '',
+            controlType:  'ToolbarButton',
+            isEnabled:    enabled,
+            x: 0, y: 0, width: 0, height: 0,
+        });
+    }
+    return arr;
+}
+
 function buildWorkflows(elements: ScanResult['elements'], windowTitle: string): GeneratedWorkflow[] {
     const workflows: GeneratedWorkflow[] = [];
-    const btns = elements.buttons;
+    const tbBtns = elements.toolbarButtons;
 
-    const addBtn  = btns.find(b => /추가|add.*url/i.test(b.name));
-    const startBtn = btns.find(b => /^(시작|resume|start)/i.test(b.name));
-    const pauseBtn = btns.find(b => /^(중지|pause|stop)/i.test(b.name) && !/all|모두/i.test(b.name));
-    const deleteBtn = btns.find(b => /제거|delete|remove/i.test(b.name) && !/all|모두/i.test(b.name));
+    for (const entry of TOOLBAR_ROLE_MAP) {
+        const btn     = tbBtns[entry.index];
+        const label   = btn?.name ? `"${btn.name}"` : entry.role;
+        const trigger = `Toolbar btn ${entry.index} (${entry.role})`;
 
-    if (addBtn) {
-        workflows.push({
-            name: 'Add New Download',
-            triggerElement: addBtn.name,
-            steps: [
-                `Click "${addBtn.name}" button`,
-                'Enter download URL in Add URL dialog',
-                'Click OK/Start to queue the download',
-            ],
-        });
-    }
-
-    if (startBtn) {
-        workflows.push({
-            name: 'Start / Resume Download',
-            triggerElement: startBtn.name,
-            steps: [
-                'Select download item from SysListView32',
-                `Click "${startBtn.name}" toolbar button`,
-                'Wait for status → Downloading / Connecting',
-            ],
-        });
-    }
-
-    if (pauseBtn) {
-        workflows.push({
-            name: 'Pause Download',
-            triggerElement: pauseBtn.name,
-            steps: [
-                'Select download item from SysListView32',
-                `Click "${pauseBtn.name}" toolbar button`,
-                'Wait for status → Paused / Stopped',
-            ],
-        });
-    }
-
-    if (deleteBtn) {
-        workflows.push({
-            name: 'Delete Download',
-            triggerElement: deleteBtn.name,
-            steps: [
-                'Select download item from SysListView32',
-                `Click "${deleteBtn.name}" toolbar button`,
-                'Wait 500ms for confirmation dialog',
-                'Click "예" / OK to confirm deletion',
-                'Verify item removed from list (timeout 20s)',
-            ],
-        });
+        if (entry.action === 'add') {
+            workflows.push({
+                name: 'Add New Download',
+                triggerElement: trigger,
+                steps: [
+                    `Click ${label} toolbar button (index ${entry.index})`,
+                    'Enter download URL in Add URL dialog',
+                    'Click OK/Start to queue the download',
+                ],
+            });
+        } else if (entry.action === 'start') {
+            workflows.push({
+                name: 'Start / Resume Download',
+                triggerElement: trigger,
+                steps: [
+                    'Select download item from SysListView32',
+                    `Click ${label} toolbar button (index ${entry.index})`,
+                    'Wait for status → Downloading / Connecting',
+                ],
+            });
+        } else if (entry.action === 'pause') {
+            workflows.push({
+                name: 'Pause Download',
+                triggerElement: trigger,
+                steps: [
+                    'Select download item from SysListView32',
+                    `Click ${label} toolbar button (index ${entry.index})`,
+                    'Wait for status → Paused / Stopped',
+                ],
+            });
+        } else if (entry.action === 'delete') {
+            workflows.push({
+                name: 'Delete Download',
+                triggerElement: trigger,
+                steps: [
+                    'Select download item from SysListView32',
+                    `Click ${label} toolbar button (index ${entry.index})`,
+                    'Wait 500ms for confirmation dialog',
+                    'Click "예" / OK to confirm deletion',
+                    'Verify item removed from list (timeout 20s)',
+                ],
+            });
+        }
     }
 
     if (elements.lists.length > 0) {
@@ -148,7 +183,7 @@ function buildWorkflows(elements: ScanResult['elements'], windowTitle: string): 
         workflows.push({
             name: `Interact with ${windowTitle}`,
             steps: [
-                `${btns.length} button(s) discovered`,
+                `${elements.buttons.length} button(s) discovered`,
                 `${elements.lists.length} list(s) discovered`,
                 `${elements.toolbars.length} toolbar(s) discovered`,
             ],
@@ -185,7 +220,16 @@ export async function scanApplication(): Promise<ScanResult> {
     const allWindows = extractByType(xml, 'Window');
     const dialogs    = allWindows.filter(w => w.className === '#32770' || w.className === '#32768');
 
-    const elements = { buttons, lists, toolbars, menuItems };
+    // Live element query — preserves index order, excludes non-toolbar buttons
+    let toolbarButtons: UIElement[] = [];
+    try {
+        toolbarButtons = await getToolbarButtons();
+        console.log(`[Scanner] Toolbar buttons queried: ${toolbarButtons.length}`);
+    } catch (e) {
+        console.warn('[Scanner] Toolbar button query failed (non-fatal):', e instanceof Error ? e.message : e);
+    }
+
+    const elements = { buttons, lists, toolbars, menuItems, toolbarButtons };
     const stats: ScanStats = {
         buttonCount:   buttons.length,
         listCount:     lists.length,
@@ -222,13 +266,28 @@ export function printScanResult(result: ScanResult): void {
     console.log(`  Found   : ${stats.buttonCount} buttons | ${stats.listCount} list(s) | ${stats.dialogCount} dialog(s) | ${stats.toolbarCount} toolbar(s)`);
     console.log(SEP);
 
-    if (result.elements.buttons.length > 0) {
-        console.log('\nDISCOVERED BUTTONS\n');
-        result.elements.buttons.forEach((btn, i) => {
+    // Core automation targets — live-queried, index-ordered
+    console.log('\nTOOLBAR ACTION BUTTONS\n');
+    if (result.elements.toolbarButtons.length > 0) {
+        result.elements.toolbarButtons.forEach((btn, i) => {
+            const roleEntry = TOOLBAR_ROLE_MAP.find(r => r.index === i);
             const st = btn.isEnabled ? '✓' : '✗ disabled';
-            const aid = btn.automationId ? `  aid:${btn.automationId}` : '';
-            console.log(`  [${i}] "${btn.name || '(unnamed)'}"`  + aid + `  [${st}]`);
+            if (roleEntry) {
+                // 핵심 액션 버튼 (index 0/1/2/4)
+                const mainLabel = btn.name ? `"${btn.name}"` : `${roleEntry.role}  (UIA Name 없음)`;
+                const suffix    = btn.name ? `  ← ${roleEntry.role}` : '';
+                console.log(`  [${i}] ${mainLabel}${suffix}  [${st}]`);
+            } else {
+                // 역할 미매핑 버튼 (index 3, 5, 6, ...)
+                console.log(`      [${i}] "${btn.name || '(unnamed)'}"  [${st}]`);
+            }
         });
+    } else {
+        console.log('  (no toolbar buttons found — WinAppDriver session may not be active)');
+    }
+    const otherCount = result.elements.buttons.length - result.elements.toolbarButtons.length;
+    if (otherCount > 0) {
+        console.log(`\n  + ${otherCount} other UI buttons (scrollbars, window controls, etc.) — not listed`);
     }
 
     if (result.elements.lists.length > 0) {

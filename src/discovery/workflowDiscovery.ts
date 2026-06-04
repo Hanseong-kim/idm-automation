@@ -1,3 +1,4 @@
+//workflowDiscovery.ts
 export interface ScreenNode {
     name: string;
     type: 'screen' | 'action' | 'state' | 'dialog';

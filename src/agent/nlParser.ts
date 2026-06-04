@@ -7,14 +7,16 @@ import type { ActionType, IdmCommand } from './types';
 type ActionPattern = { pattern: RegExp; action: ActionType };
 type IndexResolver = { pattern: RegExp; resolve: (m: RegExpMatchArray) => number };
 
-// Order matters: 'resume' before 'start' to avoid capturing "start (resume)"
+// 순서가 중요하다: 구체적 동작을 먼저, 가장 일반적인 'start'를 맨 마지막에.
+// 명사 'download'는 어떤 패턴에도 단독 트리거로 넣지 마라 — 대부분의 명령에
+// 명사로 등장하므로 action 판별을 오염시킨다.
 const ACTION_PATTERNS: ActionPattern[] = [
-    { pattern: /\b(clear|clean\s*up|remove\s*completed|delete\s*completed)\b/i, action: 'clear'  },
-    { pattern: /\b(resume|continue|unpause)\b/i,                                  action: 'resume' },
-    { pattern: /\b(start|begin|download|add|new|download\s*again|fetch|grab|get(?!\s+all))\b/i, action: 'start'  },
-    { pattern: /\b(pause|suspend|halt|stop)\b/i,                                  action: 'pause'  },
-    { pattern: /\b(delete|remove|cancel)\b/i,                                     action: 'delete' },
-    { pattern: /\b(list|show|display|get\s*all|what|view)\b/i,                    action: 'list'   },
+    { pattern: /\b(clear|clean\s*up|remove\s+completed|delete\s+completed|remove\s+finished|clear\s+completed)\b/i, action: 'clear'  },
+    { pattern: /\b(list|show|display|view|get\s+all|what('?s)?)\b/i,                  action: 'list'   },
+    { pattern: /\b(resume|continue|unpause)\b/i,                                      action: 'resume' },
+    { pattern: /\b(pause|suspend|halt|stop)\b/i,                                      action: 'pause'  },
+    { pattern: /\b(delete|remove|cancel)\b/i,                                         action: 'delete' },
+    { pattern: /\b(start|begin|download\s+again|fetch|grab|get(?!\s+all)|add|new)\b/i, action: 'start'  },
 ];
 
 const INDEX_RESOLVERS: IndexResolver[] = [
@@ -31,11 +33,16 @@ export function parseNaturalLanguage(input: string): IdmCommand {
         throw new Error('Empty command. Try: "pause ubuntu.iso" or "list all downloads".');
     }
 
+    // URL이 포함된 명령은 거의 항상 add/start 다 — action 판별보다 먼저 단락.
+    const urlMatch = input.match(/(https?:\/\/[^\s]+)/i);
+    const safeUrl = urlMatch ? urlMatch[0] : null;
+
     let action: ActionType | undefined;
-    for (const ap of ACTION_PATTERNS) {
-        if (ap.pattern.test(input)) {
-            action = ap.action;
-            break;
+    if (safeUrl) {
+        action = 'add';   // URL 포함 명령은 새 다운로드 추가 — start(기존 항목 force-start)와 분리
+    } else {
+        for (const ap of ACTION_PATTERNS) {
+            if (ap.pattern.test(input)) { action = ap.action; break; }
         }
     }
     if (!action) {
@@ -53,9 +60,6 @@ export function parseNaturalLanguage(input: string): IdmCommand {
             break;
         }
     }
-
-    const urlMatch = input.match(/(https?:\/\/[^\s]+)/i);
-    const safeUrl = urlMatch ? urlMatch[0] : null;
 
     // URL이 존재하면 원본 URL을 그대로 쓰고, 없으면 텍스트를 정제(extractTarget)합니다.
     const target = safeUrl ? safeUrl : extractTarget(input);
@@ -86,29 +90,32 @@ const SYSTEM_PROMPT = `You are a command parser for Internet Download Manager (I
 Parse English natural language commands only into a structured IDM command.
 
 Return a JSON object with exactly these fields:
-- action: one of "start" | "pause" | "resume" | "delete" | "list" | "clear"
-- target: filename or keyword to match (use "*" for all/wildcard)
+- action: one of "add" | "start" | "pause" | "resume" | "delete" | "list" | "clear"
+- target: filename, keyword, or URL to match (use "*" for all/wildcard)
 - index: 0-based integer if a specific position is mentioned, omit otherwise
   (use -1 for "last")
 
+"add" queues a NEW download from a URL — use it whenever a URL is provided.
+"start" force-starts an EXISTING queued/stopped download (no URL needed).
 "clear" removes ALL completed downloads — use it for "clean up", "clear completed", "remove finished".
 
 Examples:
-Input: "list all downloads"           → {"action":"list","target":"*"}
-Input: "pause the first download"     → {"action":"pause","target":"*","index":0}
-Input: "resume ubuntu.iso"            → {"action":"resume","target":"ubuntu.iso"}
-Input: "delete the last item"         → {"action":"delete","target":"*","index":-1}
-Input: "start 3rd download"           → {"action":"start","target":"*","index":2}
-Input: "clear all completed"          → {"action":"clear","target":"*"}
-Input: "can you stop download #2?"    → {"action":"pause","target":"*","index":1}
-Input: "show me what's downloading"   → {"action":"list","target":"*"}`;
+Input: "list all downloads"                              → {"action":"list","target":"*"}
+Input: "pause the first download"                        → {"action":"pause","target":"*","index":0}
+Input: "resume ubuntu.iso"                               → {"action":"resume","target":"ubuntu.iso"}
+Input: "delete the last item"                            → {"action":"delete","target":"*","index":-1}
+Input: "start 3rd download"                              → {"action":"start","target":"*","index":2}
+Input: "clear all completed"                             → {"action":"clear","target":"*"}
+Input: "can you stop download #2?"                       → {"action":"pause","target":"*","index":1}
+Input: "show me what's downloading"                      → {"action":"list","target":"*"}
+Input: "add https://example.com/file.zip"                → {"action":"add","target":"https://example.com/file.zip"}`;
 
 const RESPONSE_SCHEMA = {
     type: 'OBJECT',
     properties: {
         action: {
             type: 'STRING',
-            enum: ['start', 'pause', 'resume', 'delete', 'list', 'clear'],
+            enum: ['add', 'start', 'pause', 'resume', 'delete', 'list', 'clear'],
         },
         target: { type: 'STRING' },
         index:  { type: 'INTEGER' },
@@ -128,7 +135,7 @@ interface GeminiResponse {
 function isValidIdmCommand(obj: unknown): obj is IdmCommand {
     if (typeof obj !== 'object' || obj === null) return false;
     const o = obj as Record<string, unknown>;
-    const validActions: string[] = ['start', 'pause', 'resume', 'delete', 'list', 'clear'];
+    const validActions: string[] = ['add', 'start', 'pause', 'resume', 'delete', 'list', 'clear'];
     if (!validActions.includes(o['action'] as string)) return false;
     if (typeof o['target'] !== 'string') return false;
     if ('index' in o && typeof o['index'] !== 'number') return false;
@@ -211,15 +218,6 @@ export async function parseWithOllama(text: string): Promise<IdmCommand | null> 
     }
 }
 
-
-// ---------------------------------------------------------------------------
-// Main entry point: LLM first, regex fallback
-// ---------------------------------------------------------------------------
-
-// Known action keywords — if NONE appear in user input, reject any LLM result
-// (prevents Gemini from mapping gibberish like "abcxyz" to action:'list')
-const KNOWN_ACTION_RE =
-    /\b(start|begin|pause|stop|suspend|halt|resume|continue|unpause|delete|remove|cancel|list|show|display|view|clear)\b/i;
 
 // ---------------------------------------------------------------------------
 // Main entry point: 환경 변수에 따라 모델 스위칭 (LLM first, regex fallback)

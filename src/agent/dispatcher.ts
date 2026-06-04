@@ -1,3 +1,4 @@
+//dispatcher.ts
 import type { IdmCommand, CommandResult, DownloadItem } from './types';
 import type { ExecutionMonitor } from '../monitoring/executionMonitor';
 import { resolveTarget } from './targetResolver';
@@ -10,7 +11,7 @@ export interface UiFunctions {
     resumeDownload(item: DownloadItem): Promise<void>;
     deleteDownload(item: DownloadItem): Promise<void>;
     clearCompleted(): Promise<number>;
-    addUrlDownload(url: string): Promise<void>;
+    addUrlDownload(url: string): Promise<{ wasDuplicate: boolean }>;
 }
 
 export async function dispatch(
@@ -73,22 +74,33 @@ export async function dispatch(
             return resultRef;
         }
 
-        const urlMatch = target.match(/https?:\/\/[^\s]+/i);
-        const finalUrl = urlMatch ? urlMatch[0] : null;
-
-        // 이제 URL이 발견되면, 무조건 URL 다운로드 액션을 실행합니다.
-        if (action === 'start' && finalUrl) {
+        if (action === 'add') {
+            const urlMatch = target.match(/https?:\/\/[^\s]+/i);
+            const finalUrl = urlMatch ? urlMatch[0] : (target && target !== '*' ? target : null);
+            if (!finalUrl) {
+                throw new Error('FAILED: No URL provided for add action.');
+            }
             monitor?.step(2, 3, `Adding new download from URL: ${finalUrl}`, true);
             const beforeCount = downloads.length;
-            await ui.addUrlDownload(finalUrl);
+            const { wasDuplicate } = await ui.addUrlDownload(finalUrl);
 
-            // Verify the download was actually added — compare list size before and after
+            if (wasDuplicate) {
+                // 중복 — 이미 목록에 존재하므로 count 증가 없음이 정상. 검증 생략.
+                const msg = `URL already in list (duplicate handled): ${finalUrl}`;
+                monitor?.step(3, 3, msg, true);
+                console.log(`[IDM Agent] ${msg}`);
+                resultRef = { success: true, message: msg };
+                record();
+                return resultRef;
+            }
+
+            // 정상 — 새 다운로드는 count 증가로 검증
             const afterDownloads = await ui.extractDownloads();
             if (afterDownloads.length <= beforeCount) {
                 throw new Error(`Download verification failed: "${finalUrl}" was not added to the IDM download list.`);
             }
 
-            const msg = `URL download started successfully: ${finalUrl}`;
+            const msg = `URL download added successfully: ${finalUrl}`;
             monitor?.step(3, 3, msg, true);
             console.log(`[IDM Agent] ${msg}`);
             resultRef = { success: true, message: msg };
@@ -102,6 +114,7 @@ export async function dispatch(
 
         const messages: string[] = [];
         const pastTense: Record<string, string> = {
+            add:    'added',
             start:  'started',
             pause:  'paused',
             resume: 'resumed',
