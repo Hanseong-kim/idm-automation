@@ -38,8 +38,8 @@ const IDM_DIALOG = {
     BASE:      '//Window[@ClassName="#32770"]',
     // URL Input dialog  → probe: has an Edit textbox (the URL entry field)
     URL_EDIT:  '//Window[@ClassName="#32770"]//Edit',
-    // File Info dialog  → probe: has a "Start Download" action button
-    START_BTN: '//Window[@ClassName="#32770"]//Button[@Name="Start Download" or @Name="다운로드 시작" or @Name="시작"]',
+    // File Info dialog  → identified via findStartButtonInDialog() (keyword scan).
+    //   Exact @Name probes fail due to locale variants, shortcut chars (&), and IDM version diffs.
 } as const;
 
 const COMPLETED_STATUSES = ['Complete', 'Completed', 'Done', 'Finished', '100%'];
@@ -667,50 +667,179 @@ export class IdmPage {
     }
     async addUrlDownload(url: string): Promise<void> {
         await this.waitForReady();
+        const { execSync } = await import('child_process');
 
-        // 1. Click 'Add URL' toolbar button
-        console.log('[IDMPage] Clicking "Add URL" button...');
+        // 1. Click "Add URL" toolbar button (index 0)
+        console.log('[addUrlDownload] Clicking "Add URL" button...');
         await this.clickToolbarButton(SEL.TB_ADD_URL);
 
-        // 2. Identify URL input dialog by its Edit element (IDM_DIALOG.URL_EDIT).
-        //    All IDM dialogs share #32770 — we target the Edit field as the type probe.
-        const urlInput = await $(IDM_DIALOG.URL_EDIT);
-        await urlInput.waitForDisplayed({ timeout: 5000 });
+        // 2. Wait for URL input dialog (Edit field) to appear
+        console.log('[addUrlDownload] Waiting for URL input dialog...');
+        await $(IDM_DIALOG.URL_EDIT).waitForExist({ timeout: 5000 });
+        console.log('[addUrlDownload] URL input dialog appeared.');
 
-        // 3. Force OS focus to the textbox, then write URL directly via WebdriverIO.
-        //    setValue() clicks, clears, and types in one atomic call — no PowerShell needed.
-        console.log('[IDMPage] Setting URL value...');
-        await urlInput.click();
-        await urlInput.setValue(url);
+        // 3. Set clipboard with URL
+        console.log('[addUrlDownload] Setting clipboard...');
+        execSync(`powershell -command "Set-Clipboard -Value '${url}'"`, { windowsHide: true });
 
-        // 4. Wait for OK button to be fully rendered and clickable before pressing it.
-        //    waitForClickable() prevents Ghost Clicks (clicking before the button is ready).
-        const addressDialog = await $(IDM_DIALOG.BASE);
-        const okBtn = await addressDialog.$('.//Button[@Name="OK" or @Name="확인"]');
-        await okBtn.waitForClickable({ timeout: 5000 });
+        // 4. Force focus to #32770 dialog via SetForegroundWindow, then paste
+        //    SendKeys loses focus when spawned without a parent window — SetForegroundWindow
+        //    pins the dialog to the foreground before sending ^a^v so the paste lands correctly.
+        console.log('[addUrlDownload] Focusing dialog via SetForegroundWindow and pasting...');
+        const psScript = [
+            'Add-Type @"',
+            'using System;',
+            'using System.Runtime.InteropServices;',
+            'public class Win32 {',
+            '    [DllImport("user32.dll")] public static extern IntPtr FindWindow(string a, string b);',
+            '    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);',
+            '}',
+            '"@',
+            '$hwnd = [Win32]::FindWindow("#32770", $null)',
+            '[Win32]::SetForegroundWindow($hwnd)',
+            'Start-Sleep -Milliseconds 300',
+            'Add-Type -AssemblyName System.Windows.Forms',
+            '[System.Windows.Forms.SendKeys]::SendWait("^a^v")',
+        ].join('\n');
+        const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
+        execSync(`powershell -NonInteractive -EncodedCommand ${encoded}`, { windowsHide: true });
+
+        // 5. Wait for paste to settle before clicking OK
+        await browser.pause(500);
+
+        // 6. Click OK
+        console.log('[addUrlDownload] Clicking OK button...');
+        const okBtn = $(IDM_DIALOG.BASE).$('.//Button[@Name="OK" or @Name="확인"]');
+        await okBtn.waitForExist({ timeout: 3000 });
         await okBtn.click();
+        console.log('[addUrlDownload] OK clicked.');
 
-        // 5. Verify the URL input dialog closed — key on Edit probe vanishing, NOT on
-        //    #32770 vanishing, because the File Info dialog (also #32770) may appear
-        //    immediately and cause a false positive.
-        await urlInput.waitForExist({ reverse: true, timeout: 5000 });
+        // 7. Wait for URL input dialog to close (probe: Edit field gone)
+        console.log('[addUrlDownload] Waiting for URL dialog to close...');
+        await browser.waitUntil(
+            async () => {
+                try { return !(await $(IDM_DIALOG.URL_EDIT).isExisting()); }
+                catch { return true; }
+            },
+            { timeout: 5000, interval: 200, timeoutMsg: 'URL dialog did not close.' }
+        );
+        console.log('[addUrlDownload] URL dialog closed.');
 
-        // 6. Handle any intermediate warning dialogs (e.g., duplicate URL warnings)
-        await this.handleUnexpectedDialog("I want to add and start downloading this URL file.");
-
-        // 7. Identify File Info dialog by its "Start Download" button (IDM_DIALOG.START_BTN),
-        //    wait for it to be clickable, then press it.
-        console.log('[IDMPage] Waiting for Download File Info dialog (Start Download button probe)...');
-        try {
-            const startBtn = await $(IDM_DIALOG.START_BTN);
-            await startBtn.waitForClickable({ timeout: 8000 });
-            await startBtn.click();
-            console.log('[IDMPage] "Start Download" clicked successfully.');
-        } catch {
-            console.log('[IDMPage] "Start Download" button not found. Assuming download started automatically or was handled by Self-Healing.');
+        // [진단] File Info 창 ClassName / 버튼 트리 확인용 — 동작 확인 후 이 블록 제거 예정
+        {
+            await browser.pause(1200); // File Info 창이 뜰 시간 (서버에서 파일정보 받아옴)
+            const handles = await browser.getWindowHandles();
+            console.log('[FileInfo][Diag] handles:', handles.length, JSON.stringify(handles));
+            let xml = '';
+            try { xml = await browser.getPageSource(); }
+            catch (e) { console.log('[FileInfo][Diag] getPageSource FAILED:', e instanceof Error ? e.message : e); }
+            console.log('[FileInfo][Diag] pagesource len:', xml.length);
+            console.log('[FileInfo][Diag] has "Start Download":', xml.includes('Start Download'));
+            console.log('[FileInfo][Diag] has "Download File Info":', xml.includes('Download File Info'));
+            console.log('[FileInfo][Diag] has "#32770":', xml.includes('#32770'));
+            const classes = [...new Set([...xml.matchAll(/ClassName="([^"]*)"/g)].map(m => m[1]))];
+            console.log('[FileInfo][Diag] ClassNames:', JSON.stringify(classes));
+            try { fs.writeFileSync(path.join(process.cwd(), 'logs', 'fileinfo-tree.xml'), xml, 'utf8'); } catch {}
         }
+
+        // 8. File Info ClassName 무관하게 트리 전체에서 "Start Download" 버튼을 찾아 클릭
+        console.log('[addUrlDownload] Waiting for "Start Download" button...');
+        await this.waitAndClickStartDownload();
+        console.log('[addUrlDownload] "Start Download" clicked successfully.');
     }
 
+
+    /**
+     * IDM File Info 창의 ClassName에 의존하지 않고 트리 전체에서
+     * "Start Download" 버튼을 폴링으로 찾아 클릭한다.
+     *
+     * - 최대 12초 / 400ms 간격으로 폴링
+     * - 현재 컨텍스트 스캔 → 실패 시 다른 window handle 전환 후 재스캔
+     * - STRICT 복합 키워드만 사용 (bare "start"/"시작" 금지: 툴바 오매칭 방지)
+     */
+    private async waitAndClickStartDownload(): Promise<void> {
+        const START_KEYWORDS = ['startdownload', '다운로드시작', '지금다운로드', 'downloadnow'];
+        const AVOID_KEYWORDS = ['later', '나중', 'cancel', '취소'];
+
+        const norm = (s: string): string =>
+            s.replace(/&/g, '')
+             .replace(/\(.*?\)/g, '')
+             .toLowerCase()
+             .replace(/\s+/g, '')
+             .trim();
+
+        const isStart = (name: string): boolean => {
+            const n = norm(name);
+            if (!n) return false;
+            if (AVOID_KEYWORDS.some(kw => n.includes(kw))) return false;
+            return START_KEYWORDS.some(kw => n.includes(kw));
+        };
+
+        // 현재 컨텍스트의 //Button 전체를 스캔하여 매칭 버튼 반환
+        const scanCurrentContext = async (): Promise<WebdriverIO.Element | null> => {
+            try {
+                const raw = await $$('//Button') as unknown as WebdriverIO.Element[];
+                const btns: WebdriverIO.Element[] = [];
+                for (let i = 0; i < raw.length; i++) btns.push(raw[i]);
+                for (const btn of btns) {
+                    try {
+                        const name = (await btn.getAttribute('Name')) ?? '';
+                        if (isStart(name)) return btn;
+                    } catch {
+                        // stale — skip
+                    }
+                }
+            } catch {
+                // 컨텍스트 접근 실패 — skip
+            }
+            return null;
+        };
+
+        const deadline = Date.now() + 12_000;
+        const originalHandle = await browser.getWindowHandle();
+
+        while (Date.now() < deadline) {
+            // 1. 현재 핸들에서 스캔
+            const found = await scanCurrentContext();
+            if (found) {
+                await found.click();
+                return;
+            }
+
+            // 2. 다른 핸들 순회
+            const handles = await browser.getWindowHandles();
+            if (handles.length > 1) {
+                for (const h of handles) {
+                    if (h === originalHandle) continue;
+                    try {
+                        await browser.switchToWindow(h);
+                        const btn = await scanCurrentContext();
+                        if (btn) {
+                            await btn.click();
+                            return;
+                        }
+                    } catch {
+                        // 접근 불가 핸들 — skip
+                    } finally {
+                        try { await browser.switchToWindow(originalHandle); } catch {}
+                    }
+                }
+            }
+
+            await new Promise<void>(r => setTimeout(r, 400));
+        }
+
+        // 폴백: UI 트리 덤프 → LLM 자가치유 → throw
+        console.warn('[waitAndClickStartDownload] Button not found after 12s — falling back...');
+        await this.dumpUITree();
+        const healed = await this.handleUnexpectedDialog('add and start the download');
+        if (!healed) {
+            throw new Error(
+                '[addUrlDownload] Could not find or click the "Start Download" button after 12s. ' +
+                'Check fileinfo-tree.xml and the UI tree dump for actual button labels.'
+            );
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Bonus Feature: Self-Healing Automation (UI Tree OCR + LLM)
@@ -727,19 +856,37 @@ export class IdmPage {
     async handleUnexpectedDialog(intent: string): Promise<boolean> {
         console.log('[Self-Healing] Scanning for unexpected dialogs...');
         try {
-            // 1. 현재 떠 있는 최상단 팝업(Window) 찾기 (메인 창 제외)
-            const activeWindow = await $('//Window[@ClassName="#32770"]');
-            
-            // 15초(15번) 정도 짧게 기다리며 팝업이 뜰 시간을 줍니다
-            let isDialogExists = false;
-            for(let i=0; i<3; i++) {
-                if(await activeWindow.isExisting()) { isDialogExists = true; break; }
-                await browser.pause(500);
+            // 1. #32770 다이얼로그 확인 — SysListView32를 포함하면 메인 창이므로 제외
+            const findValidDialog = async (): Promise<WebdriverIO.Element | null> => {
+                try {
+                    const win = $('//Window[@ClassName="#32770"]');
+                    if (!(await win.isExisting())) return null;
+                    const hasList = await win.$('.//List[@ClassName="SysListView32"]').isExisting().catch(() => false);
+                    return hasList ? null : win as unknown as WebdriverIO.Element;
+                } catch {
+                    return null;
+                }
+            };
+
+            let activeWindow: WebdriverIO.Element | null = null;
+            try {
+                await browser.waitUntil(
+                    async () => {
+                        activeWindow = await findValidDialog();
+                        return activeWindow !== null;
+                    },
+                    { timeout: 1500, interval: 300, timeoutMsg: 'No valid dialog found.' }
+                );
+            } catch {
+                return false;
             }
-            if (!isDialogExists) return false; // 아무 창도 안 떴으면 종료
+
+            if (!activeWindow) return false;
+            // TypeScript CFA does not track async-callback mutations; cast to resolve 'never' inference
+            const dialog = activeWindow as unknown as WebdriverIO.Element;
 
             // 2. 팝업창 내의 모든 텍스트(Text) 긁어오기
-            const textElements = await activeWindow.$$('.//Text');
+            const textElements = dialog.$$('.//Text');
             let dialogText = '';
             for (const el of textElements) {
                 const text = await el.getText().catch(() => '');
@@ -748,7 +895,7 @@ export class IdmPage {
 
             // 3. 팝업창 내의 버튼 이름 수집 (시스템 창 제어 버튼 제외)
             const BLOCKED_BUTTONS = ['최대화', '최소화', '닫기', 'x', 'Maximize', 'Minimize', 'Close', 'Restore', 'Help'];
-            const buttonElements = await activeWindow.$$('.//Button');
+            const buttonElements = dialog.$$('.//Button');
             const availableButtons: string[] = [];
             for (const el of buttonElements) {
                 const name = await el.getAttribute('Name').catch(() => '');
@@ -804,9 +951,15 @@ export class IdmPage {
             // 5. LLM이 선택한 버튼 클릭 실행!
             if (targetButton && availableButtons.includes(targetButton)) {
                 console.log(`  [✨ Self-Healing] AI decided to click: "${targetButton}"`);
-                const btnToClick = await activeWindow.$(`.//Button[@Name="${targetButton}"]`);
+                const btnToClick = dialog.$(`.//Button[@Name="${targetButton}"]`);
                 await btnToClick.click();
-                await browser.pause(1000); // 클릭 후 애니메이션 대기
+                // 다이얼로그가 닫힐 때까지 대기 (최대 3초)
+                await browser.waitUntil(
+                    async () => {
+                        try { return !(await dialog.isExisting()); } catch { return true; }
+                    },
+                    { timeout: 3000, interval: 200, timeoutMsg: '' }
+                ).catch(() => { /* 다이얼로그가 유지되더라도 다음 단계 진행 */ });
                 return true;
             } else {
                 console.log(`  [❌ Self-Healing] AI failed to decide or picked invalid button: ${targetButton}`);

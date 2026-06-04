@@ -10,12 +10,13 @@ import { idmPage } from '../pageobjects/IdmPage';
 
 // Wire the page-object methods into the UiFunctions interface expected by dispatch()
 const idmUi: UiFunctions = {
-    extractDownloads: ()     => idmPage.extractDownloads(),
-    startDownload:    (item) => idmPage.startDownload(item),
-    pauseDownload:    (item) => idmPage.pauseDownload(item),
-    resumeDownload:   (item) => idmPage.resumeDownload(item),
-    deleteDownload:   (item) => idmPage.deleteDownload(item),
-    clearCompleted:   ()     => idmPage.clearCompleted(),
+    extractDownloads: ()      => idmPage.extractDownloads(),
+    startDownload:    (item)  => idmPage.startDownload(item),
+    pauseDownload:    (item)  => idmPage.pauseDownload(item),
+    resumeDownload:   (item)  => idmPage.resumeDownload(item),
+    deleteDownload:   (item)  => idmPage.deleteDownload(item),
+    clearCompleted:   ()      => idmPage.clearCompleted(),
+    addUrlDownload:   (url)   => idmPage.addUrlDownload(url),
 };
 
 /** Parse (LLM → regex fallback) → dispatch → log feedback. Returns the CommandResult. */
