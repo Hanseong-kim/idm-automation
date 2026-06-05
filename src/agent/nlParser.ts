@@ -1,6 +1,18 @@
 import type { ActionType, IdmCommand } from './types';
 
 // ---------------------------------------------------------------------------
+// Runtime AI provider selection
+// ---------------------------------------------------------------------------
+
+export type AiProvider = 'gemini' | 'ollama' | 'regex';
+
+let currentProvider: AiProvider =
+    (process.env['AI_PROVIDER'] as AiProvider) || 'gemini';
+
+export function setProvider(p: AiProvider): void { currentProvider = p; }
+export function getProvider(): AiProvider { return currentProvider; }
+
+// ---------------------------------------------------------------------------
 // Regex fallback parser (kept intact as the safety net)
 // ---------------------------------------------------------------------------
 
@@ -25,8 +37,13 @@ const INDEX_RESOLVERS: IndexResolver[] = [
     { pattern: /\bthird\b/i,                                    resolve: () => 2  },
     { pattern: /\b(\d+)(?:st|nd|rd|th)\b/i,                    resolve: (m) => parseInt(m[1], 10) - 1 },
     { pattern: /\b(?:number|#|no\.?|index)\s*(\d+)\b/i,        resolve: (m) => parseInt(m[1], 10) - 1 },
-    { pattern: /\blast\b/i,                                     resolve: () => -1 },
+    { pattern: /\b(last|latest|newest|most\s*recent)\b/i,        resolve: () => -1 },
 ];
+
+// LLM이 index를 추론했을 때 입력에 실제로 위치 표현이 있었는지 검증하는 패턴.
+// INDEX_RESOLVERS와 동일한 어휘를 커버한다.
+const EXPLICIT_POSITION_RE =
+    /\b(first|second|third|last|latest|newest|most\s*recent|\d+(?:st|nd|rd|th)|number\s*\d+|#\d+|no\.?\s*\d+|index\s*\d+)\b/i;
 
 export function parseNaturalLanguage(input: string): IdmCommand {
     if (!input.trim()) {
@@ -55,22 +72,17 @@ export function parseNaturalLanguage(input: string): IdmCommand {
     let index: number | undefined;
     for (const ir of INDEX_RESOLVERS) {
         const m = input.match(ir.pattern);
-        if (m) {
-            index = ir.resolve(m);
-            break;
-        }
+        if (m) { index = ir.resolve(m); break; }
     }
 
-    // URL이 존재하면 원본 URL을 그대로 쓰고, 없으면 텍스트를 정제(extractTarget)합니다.
     const target = safeUrl ? safeUrl : extractTarget(input);
-    
     return { action, target, index };
 }
 
 function extractTarget(input: string): string {
     const cleaned = input
         .replace(/\b(start|begin|pause|suspend|halt|stop|resume|continue|unpause|delete|remove|cancel|list|show|display|get|clear|clean\s*up)\b/gi, '')
-        .replace(/\b(the|a|an|all|my|this|that|first|second|third|last|download|downloads|file|files|item|items|please|completed|finished)\b/gi, '')
+        .replace(/\b(the|a|an|all|my|this|that|first|second|third|last|latest|newest|most\s*recent|download|downloads|file|files|item|items|please|completed|finished)\b/gi, '')
         .replace(/\b(\d+(?:st|nd|rd|th)?|#\d+|number\s*\d+|index\s*\d+|no\.\s*\d+)\b/gi, '')
         .replace(/[,;!?]+/g, ' ')   // preserve '.' so "ubuntu.iso" survives
         .replace(/\s+/g, ' ')
@@ -108,7 +120,8 @@ Input: "start 3rd download"                              → {"action":"start","
 Input: "clear all completed"                             → {"action":"clear","target":"*"}
 Input: "can you stop download #2?"                       → {"action":"pause","target":"*","index":1}
 Input: "show me what's downloading"                      → {"action":"list","target":"*"}
-Input: "add https://example.com/file.zip"                → {"action":"add","target":"https://example.com/file.zip"}`;
+Input: "add https://example.com/file.zip"                → {"action":"add","target":"https://example.com/file.zip"}
+Input: "resume the latest download"                      → {"action":"resume","target":"*","index":-1}`;
 
 const RESPONSE_SCHEMA = {
     type: 'OBJECT',
@@ -220,38 +233,49 @@ export async function parseWithOllama(text: string): Promise<IdmCommand | null> 
 
 
 // ---------------------------------------------------------------------------
-// Main entry point: 환경 변수에 따라 모델 스위칭 (LLM first, regex fallback)
+// Main entry point: 런타임 provider에 따라 모델 스위칭 (LLM first, regex fallback)
 // ---------------------------------------------------------------------------
 export async function parseCommand(text: string): Promise<IdmCommand> {
     if (!text.trim()) {
         throw new Error('Empty command. Try: "pause ubuntu.iso" or "list all downloads".');
     }
 
-    try {
-        const aiProvider = process.env['AI_PROVIDER'] || 'gemini';
-        let llmResult = null;
+    const provider = getProvider();
 
-        if (aiProvider === 'ollama') {
-            // Ollama 로컬 모델 사용 (로컬 모델은 첫 구동 시 약간 느릴 수 있어 타임아웃을 15초로 넉넉히 줍니다)
-            console.log('[Agent] Routing request to AI model...');
+    // regex 모드: LLM 완전히 건너뛰고 바로 regex (Gemini 한도 회피 / 빠른 테스트)
+    if (provider === 'regex') {
+        console.log('[Agent] Using regex parser (LLM skipped).');
+        return parseNaturalLanguage(text);
+    }
+
+    try {
+        let llmResult: IdmCommand | null = null;
+
+        if (provider === 'ollama') {
+            console.log('[Agent] Routing request to Ollama (llama3)...');
             llmResult = await Promise.race([
                 parseWithOllama(text),
-                new Promise((resolve) => setTimeout(() => resolve(null), 15000)),
-            ]) as IdmCommand | null;
+                new Promise<null>((resolve) => setTimeout(() => resolve(null), 15000)),
+            ]);
         } else {
-            // 기존 Gemini API 사용
             console.log('[Agent] Routing request to Gemini...');
             llmResult = await Promise.race([
                 parseWithLLM(text),
-                new Promise((resolve) => setTimeout(() => resolve(null), 8000)),
-            ]) as IdmCommand | null;
+                new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000)),
+            ]);
         }
 
-        if (llmResult) return llmResult;
+        if (llmResult) {
+            // LLM이 index를 설정했지만 입력에 명시적 위치 표현이 없으면 제거한다.
+            // 예: "resume" 단독 → Gemini가 index:-1 추론, follow-up을 무력화하는 버그 방지.
+            if (llmResult.index !== undefined && !EXPLICIT_POSITION_RE.test(text)) {
+                console.warn(`[Parser] LLM inferred index=${llmResult.index} without explicit position keyword — stripping.`);
+                llmResult = { action: llmResult.action, target: llmResult.target };
+            }
+            return llmResult;
+        }
 
-        // LLM이 실패하거나 타임아웃 났을 때 Fallback 로직
-        console.warn(`[Agent Warning] ${aiProvider} parsing failed or timed out. Falling back to Regex parser.`);
-
+        console.warn(`[Agent Warning] ${provider} parsing failed or timed out. Falling back to Regex parser.`);
     } catch (err) {
         console.warn('[Agent Warning] LLM parsing failed. Falling back to Regex parser.', err instanceof Error ? err.message : err);
     }

@@ -52,7 +52,14 @@ export async function dispatch(
             }
             console.log(`[IDM Agent] Downloads (${downloads.length}):`);
             downloads.forEach(d => {
-                console.log(`  [${d.index + 1}] ${d.fileName} | ${d.size} | ${d.status} | ${d.progress}`);
+                const completed = ['complete', 'done', 'finished', '100%'].some(s => d.status.toLowerCase().includes(s));
+                const notFound  = /not\s*found|error|virus/i.test(d.status);
+                let label: string;
+                if (completed)          label = '[완료]';
+                else if (notFound)      label = '[Not Found]';
+                else if (d.isTransferring) label = `[받는중 ${d.transferRate}]`;
+                else                    label = '[멈춤]';
+                console.log(`  [${d.index + 1}] ${d.fileName} | ${d.size} | ${d.status} | ${label}`);
             });
             const msg = `Listed ${downloads.length} download(s).`;
             monitor?.success(msg);

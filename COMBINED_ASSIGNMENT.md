@@ -1,7 +1,7 @@
 # IDM Automation — Assignment Completion Status
 
 **Project:** idm-automation  
-**Updated:** 2026-06-02
+**Updated:** 2026-06-05
 
 ---
 
@@ -37,7 +37,12 @@
 | **SQLite Execution History** | ✅ Done | `src/database/executionHistory.ts` + `data/history.db` |
 | **Live UI Scanner** | ✅ Done | `src/discovery/appScanner.ts` |
 | **Voice Command Input** | ✅ Done | `src/voice/voiceInput.ts` — file-based (voice-input.txt) |
-| **English-only NLP** | ✅ Done (Korean removed) | `src/agent/nlParser.ts` — regex + Gemini EN-only |
+| **Multi-language NLP** | ✅ Done | `src/agent/nlParser.ts` — regex (EN primary) + LLM/Gemini/Ollama (EN+KO) |
+| **`add` action (URL → new download)** | ✅ Done | `dispatcher.ts` + `IdmPage.ts: addUrlDownload()` — 7th action type |
+| **Follow-up questions** | ✅ Done | `main.ts: candidatesFor() / askOnce()` — numbered candidate list when target is ambiguous |
+| **Runtime model selection** | ✅ Done | `nlParser.ts: setProvider/getProvider` — switch gemini/ollama/regex via `model` REPL command |
+| **Transfer-speed state detection** | ✅ Done | `IdmPage.ts: isTransferring() / waitForTransferState()` — Text[6] COL_SPEED; `DownloadItem.isTransferring` |
+| **Performance instrumentation** | ✅ Done | `main.ts: timed()` — per-stage [Perf] output; parse/plan/dispatch/screenshot timing |
 | **DEBUG_MODE flag** | ✅ Done | `IdmPage.ts: DEBUG_MODE = process.env.DEBUG_MODE === 'true'` |
 
 ---
@@ -65,6 +70,7 @@
 | `stats` | ✅ | Success rate, most-used action, avg duration |
 | `repeat` | ✅ | Re-run last command |
 | `undo` | ✅ | Invert last reversible action |
+| `model [gemini\|ollama\|regex]` | ✅ | Switch AI parser at runtime; no restart needed |
 
 ---
 

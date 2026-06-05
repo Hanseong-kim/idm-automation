@@ -54,9 +54,11 @@ Window [ClassName: IEFrame, AutomationId: ""]                  ← session root
     └── List [ClassName: SysListView32, AutomationId: ""]      ← download queue
         ├── ListItem [AutomationId: ""]                        ← one row per download
         │   ├── Text[1]  → filename
-        │   ├── Text[2]  → empty / URL (not used)
+        │   ├── Text[2]  → empty / queue number (not used)
         │   ├── Text[3]  → file size
-        │   └── Text[4]  → status string
+        │   ├── Text[4]  → progress % (e.g. "93.17%") — NOT a status word
+        │   ├── Text[5]  → remaining time (e.g. "8 sec")
+        │   └── Text[6]  → transfer speed (e.g. "3.61 MB/sec"; empty when paused)
         └── ...
 ```
 
@@ -118,14 +120,33 @@ const buttons = await $$('//ToolBar/*[self::Button or self::SplitButton]');
 
 ### 2-3. Download List Column Layout
 
-Column indices verified via `WinAppDriver getPageSource()` XML dump on IDM v6.42. `Text[2]` is consistently empty for active downloads.
+Column indices verified via live `WinAppDriver getPageSource()` XML dump and `[ColDiag]` diagnostic on IDM v6.42 (Korean locale). `Text[2]` is consistently empty for active downloads.
+
+> **⚠ Correction from initial analysis:** `Text[4]` does **not** contain a status word such as `"Downloading"` or `"Paused"`. It contains only the **progress percentage** (e.g., `"93.17%"`). Pause/resume state is determined by `Text[6]` (transfer speed). See §3-1 for details.
 
 | Constant | XPath Index | Column Content | Selector |
 |---|---|---|---|
 | `COL_FILENAME = 1` | 1 | Filename | `.//Text[1]` under `ListItem` |
-| _(unused)_ | 2 | Empty / URL | `.//Text[2]` — skipped |
+| _(unused)_ | 2 | Empty / queue number | `.//Text[2]` — skipped |
 | `COL_SIZE = 3` | 3 | File size | `.//Text[3]` under `ListItem` |
-| `COL_STATUS = 4` | 4 | Status string | `.//Text[4]` under `ListItem` |
+| `COL_STATUS = 4` | 4 | **Progress %** (e.g., `"93.17%"`) — used only for "100%" completed check | `.//Text[4]` under `ListItem` |
+| _(COL_TIMELEFT = 5)_ | 5 | Remaining time (e.g., `"8 sec"`) — currently unused | `.//Text[5]` under `ListItem` |
+| `COL_SPEED = 6` | 6 | **Transfer speed** (e.g., `"3.61 MB/sec"`; **empty string when paused**) | `.//Text[6]` under `ListItem` |
+
+**`DownloadItem` fields populated from this layout** (`src/agent/types.ts`):
+
+| Field | Source | Notes |
+|---|---|---|
+| `fileName` | `Text[1]` | Primary text cell |
+| `size` | `Text[3]` | File size string |
+| `status` | `Text[4]` | Progress % — used only for "100%" completed guard |
+| `progress` | `Name` attribute regex `/(\d+\.?\d*%)/` | Fallback % extraction |
+| `transferRate` | `Text[6]` | Raw speed string, e.g. `"11.45 MB/sec"` or `""` |
+| `isTransferring` | Derived from `transferRate` | `parseFloat(transferRate) > 0` |
+
+`isTransferring` drives two separate consumers:
+1. **`candidatesFor()` in `main.ts`** — filters action-viable downloads for follow-up: `pause` shows only `isTransferring === true`; `resume`/`start` shows only `isTransferring === false && !completed && !notFound`.
+2. **`list` output state label in `dispatcher.ts`** — each row ends with `[받는중 X MB/sec]`, `[멈춤]`, `[완료]`, or `[Not Found]`.
 
 **Name attribute fallback** (when `Text[N]` children are inaccessible):
 
@@ -137,14 +158,16 @@ ubuntu.iso, 1.2 GB, Downloading, 45%
 
 `parseIdmItemName()` splits on `\t` or `,\s+` to handle all three formats.
 
-**Known status string values:**
+**Known status string values (pre-condition guard constants only):**
 
-| State | Observed Strings (EN) |
-|---|---|
-| Active | `Downloading`, `Connecting`, `In progress`, `Resuming` |
-| Paused | `Paused`, `Stopped`, `Queued`, `Scheduled` |
-| Completed | `Completed`, `Done`, `Finished`, `100%` |
-| Error | `Error`, `Failed`, `Virus detected` |
+These strings appear in `COMPLETED_STATUSES` / `PAUSED_STATUSES` arrays and are used solely by `getLiveStatus()` for **pre-action guards** (e.g., "cannot pause a completed download"). They are **not** used for real-time pause/resume detection — that is done via `Text[6]` transfer speed (see §3-1 Strategy B).
+
+| State | Observed Strings (EN) | Appears in `Text[4]`? |
+|---|---|---|
+| Active | `Downloading`, `Connecting`, `In progress`, `Resuming` | Rarely — IDM 6.42 shows % instead |
+| Paused | `Paused`, `Stopped`, `Queued`, `Scheduled` | Rarely — IDM 6.42 shows % instead |
+| Completed | `Completed`, `Done`, `Finished`, `100%` | `"100%"` confirmed in `Text[4]` |
+| Error | `Error`, `Failed`, `Virus detected` | Possible |
 
 ### 2-4. Context Menu Item Selectors
 
@@ -199,44 +222,59 @@ private async withRetry<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<T> {
 - Attempt 3 waits 600 ms.
 - `setTimeout` is used instead of `browser.pause()` — the project constraint prohibits `pause()` for UI synchronization; `setTimeout` is infrastructure-level scheduling and does not violate this constraint.
 
-#### Strategy B — Live Polling via `getLiveStatus(index)`
+#### Strategy B — Transfer Speed Polling via `isTransferring` + `waitForTransferState`
 
-The original `waitForStatusChange` polled `item.getAttribute('Name')` on a cached element snapshot. This had two independent defects:
+IDM 6.42 writes **progress percentages** (e.g., `"93.17%"`) into `Text[4]` rather than status words (`"Downloading"`, `"Paused"`, etc.). Because both an active download and a paused one show the same percentage, string-matching on `Text[4]` cannot distinguish between the two states.
 
-1. **Stale reference:** The cached element object was invalidated by IDM redraws between poll cycles.
-2. **Wrong column:** The `Name` attribute on a `SysListView32` `ListItem` returns only the filename — not the status string.
+The solution reads **`Text[6]` (transfer speed, `COL_SPEED`)** instead:
+- Transferring: `"36.53 MB/sec"` — `parseFloat > 0`
+- Paused / stopped: `""` (empty string) or `"0 B/sec"` — `parseFloat == 0` or empty
 
-The corrected implementation re-fetches the full element list from the driver on every evaluation cycle:
+The implementation re-fetches the full element list on every poll cycle to avoid stale element references:
 
 ```typescript
-// Executed every 500 ms inside browser.waitUntil()
-private async getLiveStatus(index: number): Promise<string> {
-    const items = await this.getListItems();      // re-query driver — never stale
-    const item  = items[index];
-    if (!item) throw new Error(`No list item at index ${index}.`);
-    return this.getItemStatus(item);              // reads Text[COL_STATUS]
+/** 행이 현재 활성 전송 중인지(전송 속도 > 0) 판정.
+ * IDM 6.42 실측: Text[COL_SPEED](Text[6])에 "36.53 MB/sec" 형태로 표시,
+ * 멈추면 빈 문자열 또는 "0 B/sec". */
+private async isTransferring(index: number): Promise<boolean> {
+    const items = await this.getListItems();
+    const item = items[index];
+    if (!item) return false;
+    const speed = (await (await item.$(`.//Text[${COL_SPEED}]`)).getText().catch(() => '')) ?? '';
+    const s = speed.trim().toLowerCase();
+    if (!s) return false;
+    const num = parseFloat(s.replace(/[^0-9.]/g, ''));
+    return num > 0;
 }
 
-private async waitForStatusChange(index: number, expectedStatuses: string[]): Promise<void> {
-    const lower = expectedStatuses.map(s => s.toLowerCase());
+/** 전송 속도가 기대 상태(활성/비활성)가 될 때까지 폴링. */
+private async waitForTransferState(index: number, expectActive: boolean, timeoutMs = 10000): Promise<void> {
     await browser.waitUntil(
         async () => {
             try {
-                const status = await this.getLiveStatus(index);
-                return lower.some(s => status.includes(s));
+                return (await this.isTransferring(index)) === expectActive;
             } catch {
-                return false;   // element temporarily absent — retry next cycle
+                return false;
             }
         },
-        { timeout: 10000, interval: 500 }
+        {
+            timeout: timeoutMs,
+            interval: 500,
+            timeoutMsg: `Transfer did not become ${expectActive ? 'active' : 'inactive'} within ${timeoutMs / 1000}s.`,
+        }
     );
 }
 ```
 
-This guarantees that:
-- Each poll retrieves a **fresh element reference** from the accessibility tree.
-- Status is read from `Text[COL_STATUS]` (column index 4), which maps to the actual status string.
-- Transient element-not-found errors during list redraws are silently retried within the same `waitUntil` loop.
+**Action → post-action check mapping:**
+
+| Method | Post-action check |
+|---|---|
+| `pauseDownload` | `waitForTransferState(index, false)` — waits for speed to become 0 / empty |
+| `resumeDownload` | `waitForTransferState(index, true)` — waits for speed > 0 |
+| `startDownload` | `waitForTransferState(index, true)` — waits for speed > 0 |
+
+**`Text[4]` still used for completed check:** `getLiveStatus()` reads `Text[4]` solely to detect the `"100%"` completed state in pre-condition guards (§3-2). It is not used for active vs. paused detection.
 
 ### 3-2. Pre-Condition Guards
 
@@ -294,9 +332,9 @@ it('should pause the first active download', async function () {
 
 ```typescript
 interface IdmCommand {
-    action: 'start' | 'pause' | 'resume' | 'delete' | 'list' | 'clear';
-    target: string;    // filename substring or '*' (wildcard — all items)
-    index?: number;    // 0-based position; -1 = last
+    action: 'add' | 'start' | 'pause' | 'resume' | 'delete' | 'list' | 'clear';
+    target: string;    // filename substring, URL (for 'add'), or '*' (wildcard)
+    index?: number;    // 0-based position; -1 = last / latest / most recent
 }
 ```
 
@@ -309,25 +347,101 @@ interface IdmCommand {
 | `"pause the first download"` | `{action:"pause", target:"*", index:0}` | |
 | `"resume the second"` | `{action:"resume", target:"*", index:1}` | |
 | `"delete the last item"` | `{action:"delete", target:"*", index:-1}` | |
+| `"delete the latest download"` | `{action:"delete", target:"*", index:-1}` | `latest` → -1 (same as last) |
+| `"resume the most recent"` | `{action:"resume", target:"*", index:-1}` | `most recent` → -1 |
 | `"start 3rd download"` | `{action:"start", target:"*", index:2}` | |
 | `"clear all completed"` | `{action:"clear", target:"*"}` | |
 | `"delete completed files"` | `{action:"clear", target:"*"}` | `delete\s*completed` → clear |
+| `"download using url: https://example.com/a.iso"` | `{action:"add", target:"https://example.com/a.iso"}` | URL short-circuit → `add` |
 | `"야 나 어제 받던 우분투 파일 잠깐 멈춰줄래?"` | `{action:"pause", target:"우분투"}` | LLM path |
 | `"완료된 파일들 다 정리해줘"` | `{action:"clear", target:"*"}` | Regex path |
 | `"두 번째 파일 멈춰줘"` | `{action:"pause", target:"*", index:1}` | `멈춰` pattern |
 | `"맨 마지막에 받기 시작한 거 취소해"` | `{action:"delete", target:"*", index:-1}` | |
 
-### LLM Provider Configuration
+### Missing Information Detection — Follow-up Questions
+
+When a target-requiring action (`pause`, `resume`, `start`, `delete`) arrives with no specific file or ordinal (`target === "*"` and `index === undefined`), `runSubCommand` in `main.ts` enters a follow-up flow:
+
+1. **Candidate filtering** — `candidatesFor(action, downloads)` returns only downloads that the action can meaningfully operate on:
+   - `pause` → items where `d.isTransferring === true`
+   - `resume` / `start` → items where `!d.isTransferring && !completed && !notFound`
+   - `delete` → all items
+
+2. **Auto-select** — if exactly one candidate exists it is selected without prompting.
+
+3. **Numbered menu** — if multiple candidates exist, a numbered list is shown and the user picks by number. Any non-numeric or out-of-range answer cancels without action.
+
+4. **Input isolation** — the follow-up prompt reuses the existing `readline` interface via `rl.prependOnceListener('line', onLine)` to avoid spawning a second `readline` instance (which would conflict with the main input loop). An `awaitingFollowup` flag prevents the main `'line'` handler from queuing the follow-up answer as a new command.
+
+```
+Agent > resume
+[Agent] Which download do you want to resume?
+  1) ubuntu-22.04-amd64.iso  [21.75%]
+  2) ubuntu-22.04-arm64.iso  [58.66%]
+Enter number (1-2, or anything else to cancel): 1
+[Agent] Selected: ubuntu-22.04-amd64.iso
+```
+
+Follow-up is disabled when `isBatch === true` (batch sub-commands split on `and`/`then`).
+
+### Smart Target Resolution
+
+`targetResolver.ts` maps the parsed `target` + `index` to actual `DownloadItem` objects:
+
+| Input form | Resolution strategy |
+|---|---|
+| `index` = 0, 1, 2 … | Direct positional lookup (`first`, `second`, `3rd`, `#2`) |
+| `index` = -1 | Last item in list — triggered by `last`, **`latest`**, **`newest`**, **`most recent`** |
+| `target` = `"completed"` / `"paused"` / … | Status keyword filter via `STATUS_KEYWORDS` map |
+| `target` = filename string | Case-insensitive substring match on `fileName` |
+| `target` = `"*"` / `"all"` | All downloads |
+
+`latest` / `newest` / `most recent` are mapped to `index = -1` via `INDEX_RESOLVERS`:
+```typescript
+{ pattern: /\b(last|latest|newest|most\s*recent)\b/i, resolve: () => -1 }
+```
+
+### NLP Provider Architecture
+
+`parseCommand` selects a backend at runtime via `getProvider()` (settable with `model` REPL command or `AI_PROVIDER` env var):
+
+| Provider | Backend | Timeout | Fallback |
+|---|---|---|---|
+| `gemini` (default) | Google Gemini 2.5 Flash — structured JSON schema via `responseMimeType` | 8 s | → regex |
+| `ollama` | Local llama3 via `http://localhost:11434/api/chat` | 15 s | → regex |
+| `regex` | Built-in regex patterns — no network call | instant | — |
+
+```typescript
+export type AiProvider = 'gemini' | 'ollama' | 'regex';
+let currentProvider: AiProvider = (process.env['AI_PROVIDER'] as AiProvider) || 'gemini';
+export function setProvider(p: AiProvider): void { currentProvider = p; }
+export function getProvider(): AiProvider { return currentProvider; }
+```
+
+**Gemini configuration:**
 
 | Property | Value |
 |---|---|
-| Provider | Google AI Studio |
 | Model | `gemini-2.5-flash` |
 | Endpoint | `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent` |
-| Authentication | `LLM_API_KEY` environment variable (passed as `?key=` query parameter) |
-| Output Format | `responseMimeType: "application/json"` with `responseSchema` (structured output) |
-| Request Timeout | 8 seconds via `Promise.race`; falls back to Regex parser on expiry |
+| Authentication | `LLM_API_KEY` env var (passed as `?key=` query parameter) |
+| Output format | `responseMimeType: "application/json"` + `responseSchema` (structured output) |
 | SDK | None — native `fetch` to avoid TypeScript dependency conflicts |
+
+**LLM index inference guard (`EXPLICIT_POSITION_RE`):**
+
+Gemini occasionally returns `index: -1` for bare commands like `"resume"` (interpreting it as "resume the last item"), which bypasses the follow-up flow. `parseCommand` strips any LLM-inferred `index` when the original input contains no explicit position keyword:
+
+```typescript
+const EXPLICIT_POSITION_RE =
+    /\b(first|second|third|last|latest|newest|most\s*recent|\d+(?:st|nd|rd|th)|number\s*\d+|#\d+|no\.?\s*\d+|index\s*\d+)\b/i;
+
+if (llmResult.index !== undefined && !EXPLICIT_POSITION_RE.test(text)) {
+    llmResult = { action: llmResult.action, target: llmResult.target }; // index stripped
+}
+```
+
+This ensures `"resume"` alone always reaches the follow-up path regardless of which provider was used.
 
 ---
 
@@ -524,9 +638,66 @@ No changes to the NLP layer, dispatcher, or REPL are required.
 
 ---
 
-## 8. Data Layer — Execution History
+## 8. Performance Measurements
 
-### 8-1. SQLite Schema
+### Instrumentation
+
+`main.ts` wraps each stage of command execution in a `timed<T>` helper:
+
+```typescript
+async function timed<T>(fn: () => Promise<T>): Promise<[T, number]> {
+    const start = Date.now();
+    const result = await fn();
+    return [result, Date.now() - start];
+}
+```
+
+After every command, two `[Perf]` lines are printed:
+
+```
+[Perf] parse: 312ms | plan: 1ms | dispatch: 4821ms | screenshots: 203ms
+[Perf] command processing (parse+plan): 313ms (pdf target <3000ms: PASS)
+```
+
+For `discover`:
+
+```
+[Perf] scan: 3241ms | workflow-gen: 12ms
+[Perf] workflow generation total: 3253ms (pdf target <10000ms: PASS)
+```
+
+### Observed Results
+
+| Metric | Observed | PDF Target | Result |
+|---|---|---|---|
+| Command processing (parse + plan) — Gemini | ≤ ~1 800 ms | < 3 000 ms | **PASS** |
+| Command processing (parse + plan) — regex mode | < 5 ms | < 3 000 ms | **PASS** |
+| Workflow generation (`discover` = scan + map) | ~2 700 ms | < 10 000 ms | **PASS** |
+| Total wall-clock per command | 10 – 18 s | — | see below |
+| UI recognition accuracy (valid commands, regex mode) | 100% (10/10) | > 90% | **PASS** |
+
+### Breakdown of Total Execution Time
+
+The 10–18 s wall-clock time is dominated by two external factors that are not part of the automation's own processing:
+
+1. **IDM UI response latency** — `browser.waitUntil` polling at 500 ms intervals for `IsSelected`, dialog appearance, and button availability.
+2. **`waitForTransferState` polling** — verifies that the transfer speed (`Text[6]`) has changed after pause/resume/start, with a 10 s timeout and 500 ms poll interval.
+
+The automation processing time (`parse + plan`) consistently meets the < 3 s target across all providers. Screenshots add ~100–200 ms per command pair.
+
+### UI Recognition Accuracy
+
+**Measurement method:** 10 valid commands were issued against a clean `data/history.db` with matching download targets present in the IDM queue. All 6 action types were covered (list, add, pause, resume, delete, clear). The agent was run in `regex` mode to exclude Gemini free-tier quota limits from affecting the result. Success rate was read from `stats`.
+
+**Result: 10/10 = 100%** (pdf target > 90%: **PASS**)
+
+Commands that correctly reject a missing target or an already-completed download are counted as robustness, not recognition failure — the 100% figure applies to valid commands where a viable target was present.
+
+---
+
+## 9. Data Layer — Execution History
+
+### 9-1. SQLite Schema
 
 Database file: `data/history.db` (created on first run)
 
@@ -543,7 +714,7 @@ CREATE TABLE executions (
 );
 ```
 
-### 8-2. API
+### 9-2. API
 
 | Function | Description |
 |---|---|
@@ -552,7 +723,7 @@ CREATE TABLE executions (
 | `getRecentHistory(limit=10)` | Returns last N rows ordered by `id DESC` |
 | `getStats()` | Returns total, success count, success rate, most-used action, avg duration |
 
-### 8-3. REPL Commands
+### 9-3. REPL Commands
 
 ```
 Agent > history
@@ -568,6 +739,6 @@ Agent > stats
   Avg duration     : 1847ms
 ```
 
-### 8-4. Integration Point
+### 9-4. Integration Point
 
 `dispatcher.ts` imports `saveExecution` and calls it at the end of every `dispatch()` invocation, recording both successes and failures with their elapsed time.

@@ -68,6 +68,8 @@ function parseIdmItemName(nameAttr: string, index: number): DownloadItem {
         size:     parts[1] ?? '—',
         status:   parts[2] ?? '—',
         progress: parts[3] ?? '—',
+        transferRate:   '',
+        isTransferring: false,
     };
 }
 
@@ -184,12 +186,16 @@ export class IdmPage {
         if (col0) {
             const nameAttr     = (await row.getAttribute('Name')) ?? '';
             const progressMatch = nameAttr.match(/(\d+\.?\d*%)/);
+            const transferRate = await cell(COL_SPEED);
+            const rateNum = parseFloat(transferRate.replace(/[^0-9.]/g, ''));
             return {
                 index,
                 fileName: col0,
                 size:     (await cell(COL_SIZE))   || '—',
                 status:   (await cell(COL_STATUS)) || '—',
                 progress: progressMatch ? progressMatch[1] : '—',
+                transferRate,
+                isTransferring: !isNaN(rateNum) && rateNum > 0,
             };
         }
 

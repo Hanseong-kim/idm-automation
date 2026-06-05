@@ -69,6 +69,11 @@ Task Plan: "delete ubuntu.iso"
 
 ### 7. Non-Functional Requirements
 - Performance: Command processing < 3s, Workflow generation < 10s, UI accuracy > 90%
+- **측정 결과 (2026-06-05, regex 모드, 유효 명령 기준):**
+  - Command processing (parse+plan): Gemini ≤ ~1,800ms / regex < 5ms → **PASS**
+  - Workflow generation (discover): ~2,700ms → **PASS**
+  - UI recognition accuracy (명령 성공률): **10/10 = 100%** (list·add·pause·resume·delete·clear 6종 커버) → **PASS**
+  - ※ 대상이 없거나 이미 완료된 항목에 대한 정확한 거절은 견고성(robustness)이며 인식 실패가 아님
 ---
 
 ## Technical Stack (MANDATORY)

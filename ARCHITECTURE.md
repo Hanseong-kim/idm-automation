@@ -23,7 +23,10 @@ and monitored against the live IDM desktop application via WinAppDriver.
 │  │  • Interactive "Agent > " prompt                               │  │
 │  │  • Batch splitting: "pause X and delete Y" → 2 sub-commands   │  │
 │  │  • Memory: repeat / undo (with UNDO_MAP inversion table)       │  │
-│  │  • Built-in commands: discover, screenshot, exit               │  │
+│  │  • Follow-up: candidatesFor() → numbered menu when ambiguous   │  │
+│  │  • model [gemini|ollama|regex] — runtime AI provider switch    │  │
+│  │  • timed() — per-stage [Perf] instrumentation                  │  │
+│  │  • Built-in commands: discover, screenshot, history, exit      │  │
 │  └────────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────┬───────────────────────────────────┘
                                    │ raw text
@@ -31,13 +34,17 @@ and monitored against the live IDM desktop application via WinAppDriver.
 ┌──────────────────────────────────────────────────────────────────────┐
 │  NLP LAYER                             src/agent/nlParser.ts         │
 │                                                                      │
-│  ┌─────────────────────────────┐  ┌───────────────────────────────┐  │
-│  │  Gemini 2.5 Flash (LLM)     │  │  Regex Fallback               │  │
-│  │  • JSON schema output       │  │  • 11 action keywords         │  │
-│  │  • 8-second timeout         │  │  • English + Korean           │  │
-│  │  • Few-shot examples        │  │  • Index: 1st/2nd/last/#N     │  │
-│  └─────────────────────────────┘  └───────────────────────────────┘  │
-│           LLM unavailable ──────────────────────────► fallback       │
+│  Runtime provider (setProvider / model REPL command):                │
+│                                                                      │
+│  ┌──────────────────────┐ ┌──────────────────────┐ ┌─────────────┐  │
+│  │  Gemini 2.5 Flash    │ │  Ollama (llama3)      │ │  Regex      │  │
+│  │  • JSON schema       │ │  • localhost:11434    │ │  • EN only  │  │
+│  │  • 8 s timeout       │ │  • 15 s timeout       │ │  • instant  │  │
+│  │  • EN + Korean       │ │  • EN + Korean        │ │  • no quota │  │
+│  └──────────────────────┘ └──────────────────────┘ └─────────────┘  │
+│    LLM fail / timeout ──────────────────────────────► regex fallback │
+│    EXPLICIT_POSITION_RE guard: strip LLM-inferred index when no      │
+│    explicit position keyword (prevents follow-up bypass)             │
 └──────────────────────────────────┬───────────────────────────────────┘
                                    │ IdmCommand { action, target, index }
                                    ▼
@@ -80,7 +87,8 @@ and monitored against the live IDM desktop application via WinAppDriver.
 │  • WinAppDriver selectors (SysListView32, Toolbar Button/SplitButton)│
 │  • Self-healing: context menu label normalization (strip ~, ellipsis)│
 │  • withRetry() wrapper — resilience against transient WDA failures   │
-│  • waitForStatusChange() — polls getLiveStatus() for state sync      │
+│  • waitForTransferState() — polls Text[6] transfer speed (COL_SPEED) │
+│    for pause/resume/start verification; isTransferring() > 0 = active│
 │  • dumpUITree() — full XML tree dump for debugging                   │
 │  • browser.saveScreenshot() — captures PNG before/after actions      │
 └──────────────────────────────────┬───────────────────────────────────┘
@@ -138,7 +146,7 @@ ExecutionPlan {
     "Locate download 'ubuntu.iso' in IDM list",
     "Select the download item",
     "Click Pause toolbar button (btn 2)",
-    "Wait for status to change to 'Paused'",
+    "Wait for transfer speed (Text[6]) to reach 0 (paused)",
     "Verify pause succeeded"
   ]
 }  →  printed to console
@@ -160,8 +168,8 @@ CommandResult { success: true, message: '"ubuntu.iso" paused successfully.' }
 
 | Component | File | Responsibility |
 |-----------|------|----------------|
-| CLI REPL | `src/main.ts` | User I/O, batch splitting, memory/undo, session mgmt |
-| NLP Parser | `src/agent/nlParser.ts` | Text → IdmCommand (LLM + regex dual path) |
+| CLI REPL | `src/main.ts` | User I/O, batch splitting, memory/undo, follow-up questions, model selection, performance timing (`timed`), session mgmt |
+| NLP Parser | `src/agent/nlParser.ts` | Text → IdmCommand; runtime provider (gemini/ollama/regex); EXPLICIT_POSITION_RE index guard; regex fallback |
 | Task Planner | `src/planning/taskPlanner.ts` | IdmCommand → step-by-step plan display |
 | Dispatcher | `src/agent/dispatcher.ts` | Command routing + monitoring integration |
 | Target Resolver | `src/agent/targetResolver.ts` | Fuzzy-match target name/index/status |
@@ -185,7 +193,7 @@ CommandResult { success: true, message: '"ubuntu.iso" paused successfully.' }
 | Test Runner | WebdriverIO v9 + Mocha |
 | Desktop Bridge | Appium 2.x + appium-windows-driver v5.4.0 |
 | UI Driver | WinAppDriver (Windows Accessibility API) |
-| LLM / NLP | Google Gemini 2.5 Flash (REST API) |
+| LLM / NLP | Google Gemini 2.5 Flash (REST API) · Ollama llama3 (local) · built-in regex |
 | Runtime | Node.js via `tsx` (no build step) |
 | Database | SQLite via `better-sqlite3` (native, synchronous) |
 | Target App | Internet Download Manager (Win32) |
@@ -309,3 +317,18 @@ to enable rich logging and DB recording simultaneously.
 **Non-fatal DB/screenshot/log failures** — All persistence side-effects are
 wrapped in try/catch so disk-full, missing dirs, or native-module failures
 never abort automation of the primary target.
+
+**Transfer-speed state detection** — IDM 6.42 writes progress percentages
+into Text[4] for both active and paused downloads, making string-matching on
+status words unreliable. The automation reads Text[6] (transfer speed,
+COL_SPEED) instead: a numeric value > 0 means active; empty or zero means
+paused. This drives `isTransferring()`, `waitForTransferState()`, `candidatesFor()`
+follow-up filtering, and the `list` output state labels.
+
+**Runtime model selection + LLM index guard** — `parseCommand` dispatches to
+gemini, ollama, or regex based on `currentProvider` (set by `setProvider()` /
+`model` REPL command). On LLM failure or timeout, regex activates
+automatically. `EXPLICIT_POSITION_RE` strips any index the LLM inferred
+without an explicit position keyword in the input, ensuring ambiguous commands
+always reach the follow-up question flow rather than silently targeting the
+last item.

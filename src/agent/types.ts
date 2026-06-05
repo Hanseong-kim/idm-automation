@@ -13,6 +13,8 @@ export interface DownloadItem {
     size: string;
     status: string;
     progress: string;
+    transferRate: string;    // Text[6] 원본 (예 "11.45 MB/sec", 멈추면 "")
+    isTransferring: boolean; // transferRate에 0 초과 숫자가 있으면 true
 }
 
 export interface CommandResult {

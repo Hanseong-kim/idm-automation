@@ -4,10 +4,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import readline from 'readline';
 import { remote } from 'webdriverio';
-import { parseCommand } from './agent/nlParser';
+import { parseCommand, setProvider, getProvider } from './agent/nlParser';
+import type { AiProvider } from './agent/nlParser';
 import { dispatch } from './agent/dispatcher';
 import type { UiFunctions } from './agent/dispatcher';
-import type { IdmCommand, ActionType } from './agent/types';
+import type { IdmCommand, ActionType, DownloadItem } from './agent/types';
 import { IdmPage } from '../test/pageobjects/IdmPage';
 import { ExecutionMonitor } from './monitoring/executionMonitor';
 import { generatePlan, printPlan } from './planning/taskPlanner';
@@ -70,6 +71,16 @@ async function checkSessionPin(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Performance measurement helper
+// ---------------------------------------------------------------------------
+
+async function timed<T>(fn: () => Promise<T>): Promise<[T, number]> {
+    const start = Date.now();
+    const result = await fn();
+    return [result, Date.now() - start];
+}
+
+// ---------------------------------------------------------------------------
 // Screenshot utility (Priority 2)
 // ---------------------------------------------------------------------------
 
@@ -115,6 +126,7 @@ const BANNER = `
 |    history               — last 10 executed commands    |
 |    stats                 — success rate and usage stats |
 |    plugins               — list registered app plugins  |
+|    model [gemini|ollama|regex] — switch AI parser        |
 |                                                          |
 |  Voice input:                                            |
 |    voice start/stop      — watch voice-input.txt        |
@@ -206,8 +218,8 @@ async function main() {
     // -----------------------------------------------------------------------
     // Execute one parsed command with plan display + monitoring
     // -----------------------------------------------------------------------
-    async function executeCommand(command: IdmCommand, rawText: string): Promise<void> {
-        
+    async function executeCommand(command: IdmCommand, rawText: string, parseMs = 0): Promise<void> {
+
         console.log('\n================================================================================');
         console.log(`[🚀 New Command] User Input: "${rawText}"`);
         console.log('================================================================================');
@@ -217,22 +229,30 @@ async function main() {
         );
 
         // Show step-by-step plan before execution
-        const plan = generatePlan(command, rawText);
+        const [plan, planMs] = await timed(async () => generatePlan(command, rawText));
         printPlan(plan);
 
         // Take a before-screenshot (Priority 2)
-        await captureScreenshot(browser, `before-${command.action}`);
+        const [, shotBeforeMs] = await timed(() => captureScreenshot(browser, `before-${command.action}`));
 
         // Execute with monitoring + DB recording
         monitor.startCommand(rawText);
-        const result = await dispatch(command, ui, monitor, rawText);
+        const [result, dispatchMs] = await timed(() => dispatch(command, ui, monitor, rawText));
         monitor.endCommand(rawText, result.success);
 
         // Take an after-screenshot
-        await captureScreenshot(browser, `after-${command.action}`);
+        const [, shotAfterMs] = await timed(() => captureScreenshot(browser, `after-${command.action}`));
 
         const icon = result.success ? '✓' : '✗';
         console.log(`[Result] ${icon} ${result.message}`);
+
+        const processingMs = parseMs + planMs;
+        const totalShotMs  = shotBeforeMs + shotAfterMs;
+        console.log('[Perf] ' +
+            `parse: ${parseMs}ms | plan: ${planMs}ms | dispatch: ${dispatchMs}ms | ` +
+            `screenshots: ${totalShotMs}ms`);
+        console.log(`[Perf] command processing (parse+plan): ${processingMs}ms ` +
+            `(pdf target <3000ms: ${processingMs < 3000 ? 'PASS' : 'OVER'})`);
 
         console.log('================================================================================\n');
 
@@ -241,12 +261,69 @@ async function main() {
         }
     }
 
+    // follow-up 대기 중 플래그 — true이면 메인 rl 핸들러가 stdin 입력을 큐에 넣지 않는다.
+    let awaitingFollowup = false;
+
+    // 메인 rl을 재사용해 한 줄만 가로채는 일회성 입력 헬퍼.
+    // prependOnceListener로 메인 'line' 핸들러보다 먼저 실행돼 입력을 소비한다.
+    function askOnce(msg: string): Promise<string> {
+        return new Promise(resolve => {
+            process.stdout.write(msg);
+            awaitingFollowup = true;
+            const onLine = (line: string) => {
+                resolve(line.trim());
+                // setTimeout으로 리셋을 지연 — 이 콜백 직후 동기로 실행되는
+                // 메인 'line' 핸들러가 awaitingFollowup=true를 보고 큐 삽입을 건너뛴다.
+                setTimeout(() => { awaitingFollowup = false; }, 0);
+            };
+            rl.prependOnceListener('line', onLine);
+        });
+    }
+
+    // 액션별로 실제 대상이 될 수 있는 항목만 거른다.
+    const isCompleted = (d: DownloadItem) =>
+        ['complete', 'done', 'finished', '100%'].some(s => d.status.toLowerCase().includes(s));
+    const isNotFound  = (d: DownloadItem) =>
+        /not\s*found|error|virus/i.test(d.status);
+
+    function candidatesFor(action: ActionType, downloads: DownloadItem[]): DownloadItem[] {
+        switch (action) {
+            case 'resume':
+            case 'start':
+                return downloads.filter(d => !d.isTransferring && !isCompleted(d) && !isNotFound(d));
+            case 'pause':
+                return downloads.filter(d => d.isTransferring);
+            case 'delete':
+                return downloads;
+            default:
+                return downloads;
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Process one sub-command (handles special keywords, then NLP)
     // -----------------------------------------------------------------------
-    async function runSubCommand(text: string): Promise<void> {
+    async function runSubCommand(text: string, isBatch = false): Promise<void> {
         const t = text.trim();
         if (!t) return;
+
+        // 모델 선택
+        const modelMatch = t.match(/^model(?:\s+(gemini|ollama|regex))?$/i);
+        if (modelMatch) {
+            const arg = modelMatch[1]?.toLowerCase() as AiProvider | undefined;
+            if (!arg) {
+                console.log(`[Model] Current: ${getProvider()}`);
+                console.log('[Model] Available: gemini | ollama | regex');
+                console.log('[Model] Usage: model gemini');
+            } else {
+                setProvider(arg);
+                console.log(`[Model] Switched to: ${arg}` +
+                    (arg === 'regex'  ? ' (LLM skipped — fast, no quota)' :
+                     arg === 'ollama' ? ' (local llama3 — requires ollama serve)' :
+                                       ' (Google Gemini 2.5 Flash)'));
+            }
+            return;
+        }
 
         // Plugin registry
         if (/^plugins$/i.test(t)) {
@@ -308,15 +385,25 @@ async function main() {
 
         // Workflow discovery — live scan first, then static diagram
         if (/^(discover|workflows?|show\s+workflow|ui\s+map)$/i.test(t)) {
+            let scanMs = 0;
+            let scanOk = true;
             try {
-                const scan = await scanApplication();
+                const [scan, ms] = await timed(() => scanApplication());
+                scanMs = ms;
                 printScanResult(scan);
             } catch (scanErr) {
+                scanOk = false;
                 console.log('[Scanner] Live scan failed:', scanErr instanceof Error ? scanErr.message : scanErr);
                 console.log('[Scanner] Falling back to static workflow diagram');
             }
-            const map = discoverWorkflows();
+            const [map, genMs] = await timed(async () => discoverWorkflows());
             printWorkflowDiagram(map);
+
+            const totalMs = scanMs + genMs;
+            console.log('[Perf] ' +
+                `scan: ${scanMs}ms${scanOk ? '' : ' (failed)'} | workflow-gen: ${genMs}ms`);
+            console.log(`[Perf] workflow generation total: ${totalMs}ms ` +
+                `(pdf target <10000ms: ${totalMs < 10000 ? 'PASS' : 'OVER'})`);
             return;
         }
 
@@ -339,7 +426,7 @@ async function main() {
                 last.index !== undefined ? `#${last.index + 1}` : '',
             ].filter(Boolean).join(' ');
             console.log(`[Agent] Repeating: ${label}`);
-            await executeCommand(last, `repeat: ${label}`);
+            await executeCommand(last, `repeat: ${label}`, 0);
             return;
         }
 
@@ -359,13 +446,49 @@ async function main() {
                 return;
             }
             console.log(`[Agent] Undoing: ${last.action} → ${inverseAction}`);
-            await executeCommand({ ...last, action: inverseAction }, `undo: ${last.action}`);
+            await executeCommand({ ...last, action: inverseAction }, `undo: ${last.action}`, 0);
             return;
         }
 
         // Normal NLP parse → plan → dispatch
-        const command = await parseCommand(t);
-        await executeCommand(command, t);
+        const [command, parseMs] = await timed(() => parseCommand(t));
+
+        // follow-up: 대상이 필요한 액션인데 모호하면 번호로 되묻기 (batch 시 비활성)
+        const NEEDS_TARGET: ActionType[] = ['pause', 'resume', 'start', 'delete'];
+        const isAmbiguous =
+            NEEDS_TARGET.includes(command.action) &&
+            command.index === undefined &&
+            (!command.target || command.target === '*' || command.target.toLowerCase() === 'all');
+
+        if (isAmbiguous && !isBatch) {
+            const downloads = await ui.extractDownloads();
+            const candidates = candidatesFor(command.action, downloads);
+            if (candidates.length === 0) {
+                console.log(`[Agent] No downloads available to ${command.action}.`);
+                return;
+            }
+            if (candidates.length === 1) {
+                // 후보 하나 — 되묻지 않고 확정 (원본 배열 인덱스 사용)
+                command.index = candidates[0].index;
+            } else {
+                // 여러 개 — 번호 목록 보여주고 선택받기
+                console.log(`\n[Agent] Which download do you want to ${command.action}?`);
+                candidates.forEach((d, i) => {
+                    console.log(`  ${i + 1}) ${d.fileName}  [${d.status}]`);
+                });
+                const answer = await askOnce(`Enter number (1-${candidates.length}, or anything else to cancel): `);
+                const choice = parseInt(answer, 10);
+                if (!Number.isInteger(choice) || choice < 1 || choice > candidates.length) {
+                    console.log('[Agent] Cancelled — no valid selection.');
+                    return;
+                }
+                const chosen = candidates[choice - 1];
+                command.index = chosen.index;  // 전체 downloads 기준 원본 인덱스
+                console.log(`[Agent] Selected: ${chosen.fileName}`);
+            }
+        }
+
+        await executeCommand(command, t, parseMs);
     }
 
     // -----------------------------------------------------------------------
@@ -397,7 +520,7 @@ async function main() {
                 console.log(`\n[Batch] → "${sub}"`);
             }
             try {
-                await runSubCommand(sub);
+                await runSubCommand(sub, subcommands.length > 1);
             } catch (err) {
                 console.error('[Error]', err instanceof Error ? err.message : err);
             }
@@ -407,6 +530,7 @@ async function main() {
     }
 
     rl.on('line', (input: string) => {
+        if (awaitingFollowup) return;  // follow-up 입력 중 — 큐에 넣지 않음
         lineQueue.push(input);
         drainQueue();
     });
